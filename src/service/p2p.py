@@ -11,8 +11,7 @@ class P2PManager:
         self.min_nodes = config.get('min_nodes', 1)
         self.wait_window = config.get('wait_window', 1.0)
         self.crypto = crypto_channel
-        self.broadcast_port = 45678
-        self.ping_port = 45679
+        self.broadcast_port = config.get('port', 45678)
         self.active_nodes = set()
         self.intents = {}
         self.lock = threading.Lock()

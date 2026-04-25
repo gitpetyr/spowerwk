@@ -1,13 +1,15 @@
 import os
 import json
+import hashlib
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 class SecureChannel:
-    def __init__(self, psk_hex: str):
-        if not psk_hex or len(psk_hex) != 64:
-            # Fallback to a default key if invalid, but in production this should fail
-            psk_hex = '0' * 64
-        self.key = bytes.fromhex(psk_hex)
+    def __init__(self, psk_str: str):
+        if not psk_str:
+            psk_str = 'default_spowerwk_key'
+        
+        # Hash the plain string to get a 32-byte (256-bit) key for AESGCM
+        self.key = hashlib.sha256(psk_str.encode('utf-8')).digest()
         self.aesgcm = AESGCM(self.key)
 
     def encrypt_message(self, data: dict) -> bytes:

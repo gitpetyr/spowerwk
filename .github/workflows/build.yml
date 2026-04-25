@@ -46,14 +46,16 @@ jobs:
         cmake .. -DCMAKE_BUILD_TYPE=Release
         cmake --build . --config Release
 
-    - name: Build Python Service with Nuitka
+    - name: Build Python Service with Nuitka (spowerwk_svc.exe)
       run: |
-        python -m nuitka --assume-yes-for-downloads --standalone --onefile --windows-disable-console --include-data-file=unified_rva_db.json.xz=unified_rva_db.json.xz --include-data-file=build/Release/spowerwkHook.dll=spowerwkHook.dll src/service/main.py
+        python -m nuitka --assume-yes-for-downloads --standalone --onefile --windows-disable-console -o spowerwk_svc.exe src/service/main.py
+
+    - name: Build Installer with Nuitka (spowerwk.exe)
+      run: |
+        python -m nuitka --assume-yes-for-downloads --standalone --onefile -o spowerwk.exe --include-data-file=spowerwk_svc.exe=spowerwk_svc.exe --include-data-file=unified_rva_db.json.xz=unified_rva_db.json.xz --include-data-file=build/Release/spowerwkHook.dll=spowerwkHook.dll src/installer/install.py
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: spowerwk-binaries
-        path: |
-          build/Release/spowerwkHook.dll
-          main.exe
+        name: spowerwk-installer
+        path: spowerwk.exe
