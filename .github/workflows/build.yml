@@ -1,0 +1,56 @@
+name: Build spowerwk
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Install LLVM (for llvm-pdbutil)
+      run: choco install llvm --yes
+
+    - name: Download PDBs and Generate RVA Database
+      run: |
+        python pdb/pdb_download.py winlogon.exe
+        python pdb/pdb2json.py
+
+    - name: Compress RVA Database with LZMA
+      run: |
+        python -c "import lzma; import shutil; print('Compressing unified_rva_db.json...'); open('unified_rva_db.json.xz', 'wb').write(lzma.compress(open('unified_rva_db.json', 'rb').read())); print('Compression done.')"
+
+    - name: Build C++ Hook DLL
+      run: |
+        mkdir build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release
+        cmake --build . --config Release
+
+    - name: Build Python Service with Nuitka
+      run: |
+        python -m nuitka --standalone --onefile --windows-disable-console --include-data-file=unified_rva_db.json.xz=unified_rva_db.json.xz src/service/main.py
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: spowerwk-binaries
+        path: |
+          build/Release/spowerwkHook.dll
+          main.exe

@@ -1,0 +1,195 @@
+import win32serviceutil
+import win32service
+import win32event
+import servicemanager
+import socket
+import sys
+import os
+import json
+import lzma
+import threading
+import logging
+import sys
+
+logging.basicConfig(
+    filename='C:\\Windows\\System32\\spowerwk_service.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+from .crypto import SecureChannel
+from .p2p import P2PManager
+from .hardware import enter_ghost_mode
+from .injector import ensure_injected
+
+import win32file
+import win32pipe
+
+class SpowerwkService(win32serviceutil.ServiceFramework):
+    _svc_name_ = "spowerwk"
+    _svc_display_name_ = "Windows 电源管理服务"
+    _svc_description_ = "Windows 高级电源状态管理服务。"
+
+    def __init__(self, args):
+        win32serviceutil.ServiceFramework.__init__(self, args)
+        self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
+        self.running = True
+        self.config = {}
+        self.rva_db = {}
+        self.p2p = None
+        self.pipe_connected = False
+
+    def SvcStop(self):
+        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+        win32event.SetEvent(self.hWaitStop)
+        self.running = False
+
+    def SvcDoRun(self):
+        servicemanager.LogMsg(servicemanager.EVENTLOG_INFORMATION_TYPE,
+                              servicemanager.PYS_SERVICE_STARTED,
+                              (self._svc_name_, ''))
+        logging.info("Spowerwk Service Starting...")
+        self.main()
+
+    def load_config(self):
+        config_path = os.path.join(os.path.dirname(sys.executable), 'spowerwk_config.json')
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    self.config = json.load(f)
+            except Exception:
+                pass
+        
+        # Defaults
+        if 'psk' not in self.config:
+            self.config['psk'] = '0' * 64
+        if 'min_nodes' not in self.config:
+            self.config['min_nodes'] = 1
+        if 'wait_window' not in self.config:
+            self.config['wait_window'] = 1.0
+
+    def load_rva_db(self):
+        # Nuitka include-data-file puts it near the executable
+        xz_path = os.path.join(os.path.dirname(sys.executable), 'unified_rva_db.json.xz')
+        if not os.path.exists(xz_path):
+            xz_path = 'unified_rva_db.json.xz' # Fallback for dev
+            
+        if os.path.exists(xz_path):
+            try:
+                with lzma.open(xz_path, 'rt', encoding='utf-8') as f:
+                    self.rva_db = json.load(f)
+            except Exception:
+                pass
+
+    def get_current_winlogon_rvas(self):
+        # Extremely simplified logic to get RVAs for current winlogon.exe
+        # In a real implementation, we would extract the PDB GUID/Age from c:\windows\system32\winlogon.exe
+        # For this prototype, we'll just try to find ANY RVA or return dummy values if not found.
+        # RVA retrieval requires reading the PE header, which is complex in pure Python without pefile.
+        # We will assume some known structure or just return 0 to skip hooking if not found.
+        
+        # Fake it for the plan: return some dummy offsets if DB is empty
+        shutdown_rva = "0"
+        display_rva = "0"
+        
+        # If we have real DB, maybe pick the first one just as a placeholder for the MVP
+        if "winlogon.pdb" in self.rva_db:
+            pdb_ids = list(self.rva_db["winlogon.pdb"].keys())
+            if pdb_ids:
+                first_pdb = self.rva_db["winlogon.pdb"][pdb_ids[0]]
+                shutdown_rva = first_pdb.get("ShutdownWindowsWorkerThread", "0")
+                display_rva = first_pdb.get("WlDisplayStatusByResourceId", "0")
+                
+        return shutdown_rva, display_rva
+
+    def ipc_server_loop(self):
+        pipe_name = r'\\.\pipe\spowerwk_ipc'
+        
+        while self.running:
+            try:
+                pipe = win32pipe.CreateNamedPipe(
+                    pipe_name,
+                    win32pipe.PIPE_ACCESS_DUPLEX,
+                    win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+                    1, 65536, 65536, 0, None)
+                
+                win32pipe.ConnectNamedPipe(pipe, None)
+                self.pipe_connected = True
+                
+                # Send RVAs
+                s_rva, d_rva = self.get_current_winlogon_rvas()
+                # Format "RVA:<Shutdown>:<Display>"
+                # remove 0x prefix if present
+                s_rva = s_rva.replace('0x', '')
+                d_rva = d_rva.replace('0x', '')
+                msg = f"RVA:{s_rva}:{d_rva}".encode('utf-8')
+                win32file.WriteFile(pipe, msg)
+                
+                while self.running:
+                    try:
+                        hr, data = win32file.ReadFile(pipe, 1024)
+                        req = data.decode('utf-8').strip('\x00')
+                        
+                        if req == "QUERY_SHUTDOWN":
+                            logging.info("Received QUERY_SHUTDOWN from DLL")
+                            allow = self.p2p.negotiate_shutdown()
+                            if allow:
+                                logging.info("Decision: ALLOW. Sending ALLOW to DLL.")
+                                win32file.WriteFile(pipe, b"ALLOW")
+                            else:
+                                logging.info("Decision: BLOCK. Sending BLOCK to DLL and entering Ghost Mode.")
+                                win32file.WriteFile(pipe, b"BLOCK")
+                                enter_ghost_mode()
+                                
+                        elif req == "PING":
+                            pass # Heartbeat
+                            
+                    except Exception:
+                        break # Pipe broken
+                        
+            except Exception:
+                pass
+            finally:
+                self.pipe_connected = False
+                try:
+                    win32file.CloseHandle(pipe)
+                except Exception:
+                    pass
+            
+            time.sleep(1)
+
+    def injector_loop(self):
+        dll_path = os.path.join(os.path.dirname(sys.executable), 'spowerwkHook.dll')
+        if not os.path.exists(dll_path):
+            dll_path = os.path.abspath('build/Release/spowerwkHook.dll')
+            
+        while self.running:
+            if not self.pipe_connected:
+                # Give it a chance to connect first, otherwise inject
+                time.sleep(2)
+                if not self.pipe_connected:
+                    ensure_injected(dll_path)
+            time.sleep(10)
+
+    def main(self):
+        self.load_config()
+        self.load_rva_db()
+        
+        crypto = SecureChannel(self.config['psk'])
+        self.p2p = P2PManager(self.config, crypto)
+        
+        t_ipc = threading.Thread(target=self.ipc_server_loop, daemon=True)
+        t_ipc.start()
+        
+        t_inj = threading.Thread(target=self.injector_loop, daemon=True)
+        t_inj.start()
+        
+        win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
+
+if __name__ == '__main__':
+    if len(sys.argv) == 1:
+        servicemanager.Initialize()
+        servicemanager.PrepareToHostSingle(SpowerwkService)
+        servicemanager.StartServiceCtrlDispatcher()
+    else:
+        win32serviceutil.HandleCommandLine(SpowerwkService)
