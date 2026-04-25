@@ -69,8 +69,10 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             self.config['wait_window'] = 1.0
 
     def load_rva_db(self):
-        # Nuitka include-data-file puts it near the executable
-        xz_path = os.path.join(os.path.dirname(sys.executable), 'unified_rva_db.json.xz')
+        # In Nuitka onefile mode, __file__ points to the extracted temp dir containing bundled files
+        base_dir = os.path.dirname(__file__)
+        xz_path = os.path.join(base_dir, 'unified_rva_db.json.xz')
+        
         if not os.path.exists(xz_path):
             xz_path = 'unified_rva_db.json.xz' # Fallback for dev
             
@@ -159,7 +161,9 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             time.sleep(1)
 
     def injector_loop(self):
-        dll_path = os.path.join(os.path.dirname(sys.executable), 'spowerwkHook.dll')
+        base_dir = os.path.dirname(__file__)
+        dll_path = os.path.join(base_dir, 'spowerwkHook.dll')
+        
         if not os.path.exists(dll_path):
             dll_path = os.path.abspath('build/Release/spowerwkHook.dll')
             
