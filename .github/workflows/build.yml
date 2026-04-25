@@ -48,7 +48,7 @@ jobs:
 
     - name: Build Python Service with Nuitka
       run: |
-        python -m nuitka --standalone --onefile --windows-disable-console --include-data-file=unified_rva_db.json.xz=unified_rva_db.json.xz src/service/main.py
+        python -m nuitka --assume-yes-for-downloads --standalone --onefile --windows-disable-console --include-data-file=unified_rva_db.json.xz=unified_rva_db.json.xz src/service/main.py
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
