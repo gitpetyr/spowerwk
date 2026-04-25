@@ -15,7 +15,7 @@ downloads/
 eggs/
 .eggs/
 # lib/  (Removed to allow committing libMinHook*.lib)
-lib64/
+# lib64/
 parts/
 sdist/
 var/
