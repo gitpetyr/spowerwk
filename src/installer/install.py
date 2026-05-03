@@ -4,6 +4,23 @@ import shutil
 import ctypes
 import subprocess
 import json
+import socket
+import uuid
+
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+def get_local_mac():
+    mac_num = uuid.getnode()
+    mac_hex = f'{mac_num:012x}'.upper()
+    return '-'.join(mac_hex[i:i+2] for i in range(0, 12, 2))
 
 def is_admin():
     try:
@@ -86,7 +103,7 @@ def main():
             "wait_window": 1.0,
             "port": 45678,
             "nodes": [
-                {"ip": "192.168.1.100", "mac": "00-11-22-33-44-55"}
+                {"ip": get_local_ip(), "mac": get_local_mac()}
             ]
         }
         try:
