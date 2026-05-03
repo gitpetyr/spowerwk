@@ -85,25 +85,49 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             except Exception:
                 pass
 
+    def get_pdb_id(self, file_path):
+        import struct
+        try:
+            with open(file_path, 'rb') as f:
+                pe_data = f.read()
+            rsds_idx = pe_data.find(b'RSDS')
+            if rsds_idx == -1:
+                return None
+
+            guid_bytes = pe_data[rsds_idx+4 : rsds_idx+20]
+            age = struct.unpack("<I", pe_data[rsds_idx+20 : rsds_idx+24])[0]
+
+            data1 = struct.unpack("<I", guid_bytes[0:4])[0]
+            data2 = struct.unpack("<H", guid_bytes[4:6])[0]
+            data3 = struct.unpack("<H", guid_bytes[6:8])[0]
+            
+            guid_str = f"{data1:08X}{data2:04X}{data3:04X}"
+            for b in guid_bytes[8:16]:
+                guid_str += f"{b:02X}"
+            
+            return f"{guid_str}{age:X}"
+        except Exception as e:
+            logging.error(f"Failed to get PDB ID from {file_path}: {e}")
+            return None
+
     def get_current_winlogon_rvas(self):
-        # Extremely simplified logic to get RVAs for current winlogon.exe
-        # In a real implementation, we would extract the PDB GUID/Age from c:\windows\system32\winlogon.exe
-        # For this prototype, we'll just try to find ANY RVA or return dummy values if not found.
-        # RVA retrieval requires reading the PE header, which is complex in pure Python without pefile.
-        # We will assume some known structure or just return 0 to skip hooking if not found.
-        
-        # Fake it for the plan: return some dummy offsets if DB is empty
         shutdown_rva = "0"
         display_rva = "0"
         
-        # If we have real DB, maybe pick the first one just as a placeholder for the MVP
-        if "winlogon.pdb" in self.rva_db:
-            pdb_ids = list(self.rva_db["winlogon.pdb"].keys())
-            if pdb_ids:
-                first_pdb = self.rva_db["winlogon.pdb"][pdb_ids[0]]
-                shutdown_rva = first_pdb.get("ShutdownWindowsWorkerThread", "0")
-                display_rva = first_pdb.get("WlDisplayStatusByResourceId", "0")
-                
+        winlogon_path = r"C:\Windows\System32\winlogon.exe"
+        pdb_id = self.get_pdb_id(winlogon_path)
+        
+        if pdb_id and "winlogon.pdb" in self.rva_db:
+            if pdb_id in self.rva_db["winlogon.pdb"]:
+                pdb_info = self.rva_db["winlogon.pdb"][pdb_id]
+                shutdown_rva = pdb_info.get("ShutdownWindowsWorkerThread", "0")
+                display_rva = pdb_info.get("WlDisplayStatusByResourceId", "0")
+                logging.info(f"Matched winlogon.exe PDB {pdb_id}. RVAs -> Shutdown: {shutdown_rva}, Display: {display_rva}")
+            else:
+                logging.warning(f"Winlogon PDB ID {pdb_id} not found in database. Hooking disabled to prevent crash.")
+        else:
+            logging.warning("Failed to extract PDB ID or missing database. Hooking disabled.")
+        
         return shutdown_rva, display_rva
 
     def ipc_server_loop(self):
