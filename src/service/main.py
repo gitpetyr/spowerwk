@@ -19,6 +19,37 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
+import http.server
+import socketserver
+
+class ReusableTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+def start_log_server(port, log_file_path):
+    class LogHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            try:
+                with open(log_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    self.wfile.write(f.read().encode('utf-8'))
+            except Exception as e:
+                self.wfile.write(f"Error reading log: {e}".encode('utf-8'))
+        def log_message(self, format, *args):
+            pass
+
+    def run_server():
+        try:
+            with ReusableTCPServer(("", port), LogHandler) as httpd:
+                logging.info(f"Log HTTP server started on port {port}")
+                httpd.serve_forever()
+        except Exception as e:
+            logging.error(f"Failed to start log HTTP server on port {port}: {e}")
+
+    t = threading.Thread(target=run_server, daemon=True)
+    t.start()
+
 from crypto import SecureChannel
 from p2p import P2PManager
 from hardware import enter_ghost_mode
@@ -71,6 +102,16 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             self.config['wait_window'] = 1.0
         if 'port' not in self.config:
             self.config['port'] = 45678
+
+        if 'log_server_port' not in self.config:
+            self.config['log_server_port'] = 45679
+
+        try:
+            port = int(self.config['log_server_port'])
+            log_file_path = os.path.join(log_dir, 'spowerwk_service.log')
+            start_log_server(port, log_file_path)
+        except Exception as e:
+            logging.error(f"Failed to setup log server: {e}")
 
     def load_rva_db(self):
         xz_path = os.path.join(os.path.dirname(sys.executable), 'unified_rva_db.json.xz')
