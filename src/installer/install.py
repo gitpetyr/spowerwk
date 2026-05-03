@@ -80,9 +80,9 @@ def main():
         
         install_res = subprocess.run([
             "sc", "create", "spowerwk", 
-            f"binPath= \"{svc_exe}\"", 
-            "start= auto", 
-            "DisplayName= Windows 电源管理服务"
+            f'binPath="{svc_exe}"', 
+            "start=auto", 
+            'DisplayName="Windows 电源管理服务"'
         ], capture_output=True, text=True)
 
         if install_res.returncode == 0:
@@ -92,12 +92,12 @@ def main():
                 print("spowerwk 服务启动成功！")
             else:
                 print(f"服务启动失败: {start_res.stderr}")
+                print("你可以在 C:\Windows\System32\spowerwk_config.json 中修改节点和密码配置。")
+                print("修改配置后，请在管理员终端执行 'sc stop spowerwk' 和 'sc start spowerwk' 重启服务。")
         else:
             print(f"服务注册失败: {install_res.stderr}\n{install_res.stdout}")
     
     print("\n安装流程结束。")
-    print("你可以在 C:\\Windows\\System32\\spowerwk_config.json 中修改节点和密码配置。")
-    print("修改配置后，请在管理员终端执行 'sc stop spowerwk' 和 'sc start spowerwk' 重启服务。")
     
     # 等待用户确认
     os.system("pause")
