@@ -15,7 +15,7 @@ def enter_ghost_mode():
     """
     # 1. Turn off monitor (Might only work if called from an interactive session, but we try anyway)
     # HWND_BROADCAST = 0xFFFF, WM_SYSCOMMAND = 0x0112, SC_MONITORPOWER = 0xF170, 2 = Power off
-    user32.SendMessageW(0xFFFF, 0x0112, 0xF170, 2)
+    user32.PostMessageW(0xFFFF, 0x0112, 0xF170, 2)
     
     # 2. Block Input
     user32.BlockInput(True)

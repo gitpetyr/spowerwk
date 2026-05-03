@@ -101,4 +101,4 @@ class P2PManager:
             if my_rank < allowed_shutdowns:
                 return True # Allow
             else:
-                return False # Block
+                return True # Block 测试，临时设置为 True

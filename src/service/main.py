@@ -201,8 +201,12 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                 # remove 0x prefix if present
                 s_rva = s_rva.replace('0x', '')
                 d_rva = d_rva.replace('0x', '')
-                msg = f"RVA:{s_rva}:{d_rva}".encode('utf-8')
+                msg = f"RVA:{s_rva}:{d_rva}\x00".encode('utf-8')
                 win32file.WriteFile(pipe, msg)
+                try:
+                    win32file.FlushFileBuffers(pipe)
+                except Exception:
+                    pass
                 
                 while self.running:
                     try:
@@ -214,10 +218,14 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                             allow = self.p2p.negotiate_shutdown()
                             if allow:
                                 logging.info("Decision: ALLOW. Sending ALLOW to DLL.")
-                                win32file.WriteFile(pipe, b"ALLOW")
+                                win32file.WriteFile(pipe, b"ALLOW\x00")
+                                try: win32file.FlushFileBuffers(pipe)
+                                except: pass
                             else:
                                 logging.info("Decision: BLOCK. Sending BLOCK to DLL and entering Ghost Mode.")
-                                win32file.WriteFile(pipe, b"BLOCK")
+                                win32file.WriteFile(pipe, b"BLOCK\x00")
+                                try: win32file.FlushFileBuffers(pipe)
+                                except: pass
                                 enter_ghost_mode()
                                 
                         elif req == "PING":

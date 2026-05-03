@@ -43,6 +43,7 @@ bool AskPythonServiceToBlockShutdown() {
     DWORD bytesWritten;
     const char* req = "QUERY_SHUTDOWN";
     if (!WriteFile(g_hPipe, req, strlen(req), &bytesWritten, NULL)) {
+        LogToFile("AskPythonServiceToBlockShutdown: Failed to write QUERY_SHUTDOWN to pipe.");
         return false;
     }
 
@@ -50,9 +51,19 @@ bool AskPythonServiceToBlockShutdown() {
     DWORD bytesRead;
     if (ReadFile(g_hPipe, buf, sizeof(buf) - 1, &bytesRead, NULL)) {
         if (strcmp(buf, "BLOCK") == 0) {
+            LogToFile("AskPythonServiceToBlockShutdown: Received strict BLOCK from service.");
             return true;
+        } else if (strcmp(buf, "ALLOW") == 0) {
+            LogToFile("AskPythonServiceToBlockShutdown: Received strict ALLOW from service.");
+            return false;
+        } else {
+            LogToFile(std::string("AskPythonServiceToBlockShutdown: Received unknown response: ") + buf);
         }
+    } else {
+        LogToFile("AskPythonServiceToBlockShutdown: Failed to read response from pipe.");
     }
+    
+    // Fail-open: if service is unreachable or gives unknown response, allow shutdown.
     return false;
 }
 
