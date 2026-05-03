@@ -32,7 +32,14 @@ def main():
     if not is_admin():
         print("需要管理员权限才能安装 spowerwk 服务。正在尝试提权...")
         # Re-run the program with admin rights
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv[1:]), None, 1)
+        if getattr(sys, 'frozen', False):
+            # Frozen exe: sys.executable IS the installer, pass remaining args as-is
+            params = " ".join(sys.argv[1:])
+        else:
+            # Running as a plain .py script: must include the script path (argv[0])
+            # so Python knows which file to execute after elevation.
+            params = " ".join(sys.argv)
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
         sys.exit()
 
     print("开始安装 spowerwk 服务...")

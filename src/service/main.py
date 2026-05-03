@@ -7,10 +7,10 @@ import sys
 import os
 import json
 import lzma
+import struct
 import threading
 import logging
 import time
-import sys
 
 log_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 logging.basicConfig(
@@ -127,32 +127,93 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                 pass
 
     def get_pdb_id(self, file_path):
-        import struct
+        """
+        Bug #13 fix: parse the PE Debug Directory properly instead of scanning
+        for the first 'RSDS' byte sequence, which can false-match section data.
+        Walks Optional Header -> Data Directory[6] (Debug) -> finds the
+        IMAGE_DEBUG_TYPE_CODEVIEW (type=2) entry -> reads CV_INFO_PDB70.
+        """
         try:
             with open(file_path, 'rb') as f:
                 pe_data = f.read()
-            rsds_idx = pe_data.find(b'RSDS')
-            if rsds_idx == -1:
+
+            # --- DOS header ---
+            if len(pe_data) < 0x40 or pe_data[:2] != b'MZ':
+                return None
+            e_lfanew = struct.unpack_from('<I', pe_data, 0x3C)[0]
+
+            # --- PE signature ---
+            if pe_data[e_lfanew:e_lfanew + 4] != b'PE\x00\x00':
                 return None
 
-            guid_bytes = pe_data[rsds_idx+4 : rsds_idx+20]
-            age = struct.unpack("<I", pe_data[rsds_idx+20 : rsds_idx+24])[0]
+            # Machine: 0x8664 = AMD64, 0x014C = x86
+            machine = struct.unpack_from('<H', pe_data, e_lfanew + 4)[0]
+            is_64bit = (machine == 0x8664)
 
-            data1 = struct.unpack("<I", guid_bytes[0:4])[0]
-            data2 = struct.unpack("<H", guid_bytes[4:6])[0]
-            data3 = struct.unpack("<H", guid_bytes[6:8])[0]
-            
-            guid_str = f"{data1:08X}{data2:04X}{data3:04X}"
-            for b in guid_bytes[8:16]:
-                guid_str += f"{b:02X}"
-            
-            return f"{guid_str}{age:X}"
+            num_sections   = struct.unpack_from('<H', pe_data, e_lfanew + 6)[0]
+            opt_hdr_size   = struct.unpack_from('<H', pe_data, e_lfanew + 20)[0]
+            opt_hdr_offset = e_lfanew + 24
+
+            # Data directories start at different offsets for PE32 vs PE32+
+            dd_start = opt_hdr_offset + (112 if is_64bit else 96)
+            # Debug directory is entry index 6
+            debug_dd_offset = dd_start + 6 * 8
+            debug_dir_rva  = struct.unpack_from('<I', pe_data, debug_dd_offset)[0]
+            debug_dir_size = struct.unpack_from('<I', pe_data, debug_dd_offset + 4)[0]
+
+            if debug_dir_rva == 0 or debug_dir_size == 0:
+                return None
+
+            # --- Section headers ---
+            sections_offset = opt_hdr_offset + opt_hdr_size
+
+            def rva_to_file_offset(rva):
+                for i in range(num_sections):
+                    base = sections_offset + i * 40
+                    sec_rva      = struct.unpack_from('<I', pe_data, base + 12)[0]
+                    sec_raw_size = struct.unpack_from('<I', pe_data, base + 16)[0]
+                    sec_raw_off  = struct.unpack_from('<I', pe_data, base + 20)[0]
+                    if sec_rva <= rva < sec_rva + sec_raw_size:
+                        return sec_raw_off + (rva - sec_rva)
+                return None
+
+            debug_dir_file_off = rva_to_file_offset(debug_dir_rva)
+            if debug_dir_file_off is None:
+                return None
+
+            # --- Walk IMAGE_DEBUG_DIRECTORY entries (each 28 bytes) ---
+            num_entries = debug_dir_size // 28
+            for i in range(num_entries):
+                entry = debug_dir_file_off + i * 28
+                debug_type  = struct.unpack_from('<I', pe_data, entry + 12)[0]
+                # IMAGE_DEBUG_TYPE_CODEVIEW == 2
+                if debug_type != 2:
+                    continue
+                # PointerToRawData (file offset, not RVA)
+                data_off = struct.unpack_from('<I', pe_data, entry + 24)[0]
+
+                if pe_data[data_off:data_off + 4] != b'RSDS':
+                    continue
+
+                guid_bytes = pe_data[data_off + 4: data_off + 20]
+                age = struct.unpack_from('<I', pe_data, data_off + 20)[0]
+
+                data1 = struct.unpack('<I', guid_bytes[0:4])[0]
+                data2 = struct.unpack('<H', guid_bytes[4:6])[0]
+                data3 = struct.unpack('<H', guid_bytes[6:8])[0]
+
+                guid_str = f"{data1:08X}{data2:04X}{data3:04X}"
+                for b in guid_bytes[8:16]:
+                    guid_str += f"{b:02X}"
+
+                return f"{guid_str}{age:X}"
+
+            return None
         except Exception as e:
             logging.error(f"Failed to get PDB ID from {file_path}: {e}")
             return None
 
     def get_current_winlogon_rvas(self):
-        import os
         shutdown_rva = "0"
         display_rva = "0"
         

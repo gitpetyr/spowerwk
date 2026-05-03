@@ -41,8 +41,9 @@ bool AskPythonServiceToBlockShutdown() {
     if (g_hPipe == INVALID_HANDLE_VALUE) return false;
 
     DWORD bytesWritten;
-    const char* req = "QUERY_SHUTDOWN";
-    if (!WriteFile(g_hPipe, req, strlen(req), &bytesWritten, NULL)) {
+    // Include null terminator so Python's strip('\x00') and strcmp work correctly
+    const char* req = "QUERY_SHUTDOWN\0";
+    if (!WriteFile(g_hPipe, req, strlen(req) + 1, &bytesWritten, NULL)) {
         LogToFile("AskPythonServiceToBlockShutdown: Failed to write QUERY_SHUTDOWN to pipe.");
         return false;
     }
@@ -181,8 +182,9 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
     // 4. Heartbeat loop
     while (true) {
         DWORD bytesWritten;
-        const char* beat = "PING";
-        if (!WriteFile(g_hPipe, beat, strlen(beat), &bytesWritten, NULL)) {
+        // Include null terminator to match the null-terminated protocol used by the Python service
+        const char* beat = "PING\0";
+        if (!WriteFile(g_hPipe, beat, strlen(beat) + 1, &bytesWritten, NULL)) {
             // Broken pipe -> exit thread, DLL unloads or gets reinjected
             break;
         }
