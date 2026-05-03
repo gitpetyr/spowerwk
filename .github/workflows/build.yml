@@ -46,13 +46,13 @@ jobs:
         cmake .. -DCMAKE_BUILD_TYPE=Release
         cmake --build . --config Release
 
-    - name: Build Python Service with PyInstaller (spowerwk_svc.exe)
+    - name: Build Python Service with PyInstaller (spowerwk_svc)
       run: |
-        pyinstaller --noconsole --onefile --name spowerwk_svc --hidden-import win32timezone src/service/main.py
+        pyinstaller --noconsole --onedir --name spowerwk_svc --hidden-import win32timezone src/service/main.py
 
     - name: Build Installer with PyInstaller (spowerwk.exe)
       run: |
-        pyinstaller --onefile --name spowerwk --add-data "dist/spowerwk_svc.exe;." --add-data "unified_rva_db.json.xz;." --add-data "build/Release/spowerwkHook.dll;." src/installer/install.py
+        pyinstaller --onefile --name spowerwk --add-data "dist/spowerwk_svc;spowerwk_svc" --add-data "unified_rva_db.json.xz;." --add-data "build/Release/spowerwkHook.dll;." src/installer/install.py
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4

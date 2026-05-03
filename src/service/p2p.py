@@ -3,7 +3,7 @@ import threading
 import time
 import random
 import struct
-from .crypto import SecureChannel
+from crypto import SecureChannel
 
 class P2PManager:
     def __init__(self, config, crypto_channel: SecureChannel):

@@ -9,18 +9,20 @@ import json
 import lzma
 import threading
 import logging
+import time
 import sys
 
+log_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 logging.basicConfig(
-    filename='C:\\Windows\\System32\\spowerwk_service.log',
+    filename=os.path.join(log_dir, 'spowerwk_service.log'),
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-from .crypto import SecureChannel
-from .p2p import P2PManager
-from .hardware import enter_ghost_mode
-from .injector import ensure_injected
+from crypto import SecureChannel
+from p2p import P2PManager
+from hardware import enter_ghost_mode
+from injector import ensure_injected
 
 import win32file
 import win32pipe
