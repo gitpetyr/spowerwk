@@ -10,7 +10,8 @@ std::mutex g_logMutex;
 
 void LogToFile(const std::string& msg) {
     std::lock_guard<std::mutex> lock(g_logMutex);
-    std::ofstream ofs("C:\\Windows\\System32\\spowerwk_dll.log", std::ios_base::app);
+    // Use C:\Users\Public instead of System32 to avoid any permission/protection issues
+    std::ofstream ofs("C:\\Users\\Public\\spowerwk_dll.log", std::ios_base::app);
     if (ofs.is_open()) {
         ofs << msg << std::endl;
     }
@@ -134,7 +135,9 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
     }
 
     std::string msg(buf);
+    LogToFile("InitThread: Received RVAs: " + msg);
     if (msg.rfind("RVA:", 0) != 0) {
+        LogToFile("InitThread: Invalid RVA format.");
         CloseHandle(g_hPipe);
         return 0;
     }
@@ -163,18 +166,32 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
     void* targetShutdown = (void*)((uintptr_t)hModule + shutdownRva);
     void* targetDisplay = (void*)((uintptr_t)hModule + displayRva);
 
+    LogToFile("InitThread: Target Shutdown Address: " + std::to_string((uintptr_t)targetShutdown));
+
     // 3. Initialize MinHook and create hooks
     if (MH_Initialize() != MH_OK) {
+        LogToFile("InitThread: MH_Initialize failed.");
         CloseHandle(g_hPipe);
         return 0;
     }
+    LogToFile("InitThread: MH_Initialize success.");
 
     if (shutdownRva != 0) {
-        MH_CreateHook(targetShutdown, &Hooked_ShutdownWindowsWorkerThread, reinterpret_cast<LPVOID*>(&Original_ShutdownWindowsWorkerThread));
+        if (MH_CreateHook(targetShutdown, &Hooked_ShutdownWindowsWorkerThread, reinterpret_cast<LPVOID*>(&Original_ShutdownWindowsWorkerThread)) == MH_OK) {
+            LogToFile("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread success.");
+        } else {
+            LogToFile("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread failed.");
+        }
+    } else {
+        LogToFile("InitThread: shutdownRva is 0, skipping hook.");
     }
 
     if (displayRva != 0) {
-        MH_CreateHook(targetDisplay, &Hooked_WlDisplayStatusByResourceId, reinterpret_cast<LPVOID*>(&Original_WlDisplayStatusByResourceId));
+        if (MH_CreateHook(targetDisplay, &Hooked_WlDisplayStatusByResourceId, reinterpret_cast<LPVOID*>(&Original_WlDisplayStatusByResourceId)) == MH_OK) {
+            LogToFile("InitThread: MH_CreateHook for WlDisplayStatusByResourceId success.");
+        } else {
+            LogToFile("InitThread: MH_CreateHook for WlDisplayStatusByResourceId failed.");
+        }
     }
 
     MH_EnableHook(MH_ALL_HOOKS);

@@ -272,28 +272,36 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                 while self.running:
                     try:
                         hr, data = win32file.ReadFile(pipe, 1024)
-                        req = data.decode('utf-8').strip('\x00')
+                        decoded = data.decode('utf-8')
+                        logging.debug(f"IPC Raw Data Received: {repr(decoded)}")
                         
-                        if req == "QUERY_SHUTDOWN":
-                            logging.info("Received QUERY_SHUTDOWN from DLL")
-                            allow = self.p2p.negotiate_shutdown()
-                            if allow:
-                                logging.info("Decision: ALLOW. Sending ALLOW to DLL.")
-                                win32file.WriteFile(pipe, b"ALLOW\x00")
-                                try: win32file.FlushFileBuffers(pipe)
-                                except: pass
-                            else:
-                                logging.info("Decision: BLOCK. Sending BLOCK to DLL and entering Ghost Mode.")
-                                win32file.WriteFile(pipe, b"BLOCK\x00")
-                                try: win32file.FlushFileBuffers(pipe)
-                                except: pass
-                                enter_ghost_mode()
+                        # Client writes null-terminated strings. Split by \x00 to handle merged messages.
+                        messages = decoded.split('\x00')
+                        for req in messages:
+                            if not req:
+                                continue
                                 
-                        elif req == "PING":
-                            logging.info("Received PING from DLL")
-                            pass # Heartbeat
+                            if req == "QUERY_SHUTDOWN":
+                                logging.info("Received QUERY_SHUTDOWN from DLL")
+                                allow = self.p2p.negotiate_shutdown()
+                                if allow:
+                                    logging.info("Decision: ALLOW. Sending ALLOW to DLL.")
+                                    win32file.WriteFile(pipe, b"ALLOW\x00")
+                                    try: win32file.FlushFileBuffers(pipe)
+                                    except: pass
+                                else:
+                                    logging.info("Decision: BLOCK. Sending BLOCK to DLL and entering Ghost Mode.")
+                                    win32file.WriteFile(pipe, b"BLOCK\x00")
+                                    try: win32file.FlushFileBuffers(pipe)
+                                    except: pass
+                                    enter_ghost_mode()
+                                    
+                            elif req == "PING":
+                                logging.info("Received PING from DLL")
+                                pass # Heartbeat
                             
-                    except Exception:
+                    except Exception as e:
+                        logging.error(f"IPC Pipe error or broken: {e}")
                         break # Pipe broken
                         
             except Exception:
