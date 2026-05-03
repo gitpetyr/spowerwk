@@ -41,7 +41,7 @@ def start_log_server(port, log_file_path):
 
     def run_server():
         try:
-            with ReusableTCPServer(("", port), LogHandler) as httpd:
+            with ReusableTCPServer(("0.0.0.0", port), LogHandler) as httpd:
                 logging.info(f"Log HTTP server started on port {port}")
                 httpd.serve_forever()
         except Exception as e:
@@ -290,6 +290,7 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                                 enter_ghost_mode()
                                 
                         elif req == "PING":
+                            logging.info("Received PING from DLL")
                             pass # Heartbeat
                             
                     except Exception:
@@ -314,8 +315,9 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             
         while self.running:
             if not self.pipe_connected:
+                logging.info("Injecting DLL into winlogon.exe")
                 # Give it a chance to connect first, otherwise inject
-                time.sleep(2)
+                time.sleep(0.5)
                 if not self.pipe_connected:
                     ensure_injected(dll_path)
             time.sleep(10)
