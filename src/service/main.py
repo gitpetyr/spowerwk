@@ -111,17 +111,27 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             return None
 
     def get_current_winlogon_rvas(self):
+        import os
         shutdown_rva = "0"
         display_rva = "0"
         
         winlogon_path = r"C:\Windows\System32\winlogon.exe"
+        if os.path.exists(r"C:\Windows\sysnative\winlogon.exe"):
+            winlogon_path = r"C:\Windows\sysnative\winlogon.exe"
+            
         pdb_id = self.get_pdb_id(winlogon_path)
         
         if pdb_id and "winlogon.pdb" in self.rva_db:
             if pdb_id in self.rva_db["winlogon.pdb"]:
                 pdb_info = self.rva_db["winlogon.pdb"][pdb_id]
-                shutdown_rva = pdb_info.get("ShutdownWindowsWorkerThread", "0")
-                display_rva = pdb_info.get("WlDisplayStatusByResourceId", "0")
+                
+                # 使用用户提供的正确的 Mangled 符号名
+                shutdown_mangled = "?ShutdownWindowsWorkerThread@@YAXPEAU_TP_CALLBACK_INSTANCE@@PEAX@Z"
+                display_mangled = "?WlDisplayStatusByResourceId@@YAKIW4_WLUI_STATE@@KPEAVCUser@@@Z"
+                
+                shutdown_rva = pdb_info.get(shutdown_mangled, "0")
+                display_rva = pdb_info.get(display_mangled, "0")
+                
                 logging.info(f"Matched winlogon.exe PDB {pdb_id}. RVAs -> Shutdown: {shutdown_rva}, Display: {display_rva}")
             else:
                 logging.warning(f"Winlogon PDB ID {pdb_id} not found in database. Hooking disabled to prevent crash.")
