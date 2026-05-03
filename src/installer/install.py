@@ -23,10 +23,13 @@ def main():
     # 目标目录
     target_dir = r"C:\Windows\System32"
     
-    # 源文件目录 (Nuitka onefile 释放的临时目录)
-    base_dir = os.path.dirname(__file__)
-    if not getattr(sys, 'frozen', False) and "__compiled__" not in globals():
+    # 源文件目录 (PyInstaller onefile 释放的临时目录)
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        base_dir = sys._MEIPASS
+    elif not getattr(sys, 'frozen', False) and "__compiled__" not in globals():
         base_dir = os.path.dirname(os.path.abspath(__file__))
+    else:
+        base_dir = os.path.dirname(__file__)
 
     # 要释放的文件列表
     files_to_copy = [
@@ -58,7 +61,7 @@ def main():
             "wait_window": 1.0,
             "port": 45678,
             "nodes": [
-                {"ip": "192.168.1.100", "mac": "00:11:22:33:44:55"}
+                {"ip": "192.168.1.100", "mac": "00-11-22-33-44-55"}
             ]
         }
         try:
@@ -72,19 +75,25 @@ def main():
     svc_exe = os.path.join(target_dir, "spowerwk_svc.exe")
     if os.path.exists(svc_exe):
         print("正在注册服务...")
-        subprocess.run([svc_exe, "stop"], capture_output=True)
-        subprocess.run([svc_exe, "remove"], capture_output=True)
+        subprocess.run(["sc", "stop", "spowerwk"], capture_output=True)
+        subprocess.run(["sc", "delete", "spowerwk"], capture_output=True)
         
-        install_res = subprocess.run([svc_exe, "install"], capture_output=True, text=True)
+        install_res = subprocess.run([
+            "sc", "create", "spowerwk", 
+            f"binPath= \"{svc_exe}\"", 
+            "start= auto", 
+            "DisplayName= Windows 电源管理服务"
+        ], capture_output=True, text=True)
+
         if install_res.returncode == 0:
             print("服务注册成功。正在启动服务...")
-            start_res = subprocess.run([svc_exe, "start"], capture_output=True, text=True)
+            start_res = subprocess.run(["sc", "start", "spowerwk"], capture_output=True, text=True)
             if start_res.returncode == 0:
                 print("spowerwk 服务启动成功！")
             else:
                 print(f"服务启动失败: {start_res.stderr}")
         else:
-            print(f"服务注册失败: {install_res.stderr}")
+            print(f"服务注册失败: {install_res.stderr}\n{install_res.stdout}")
     
     print("\n安装流程结束。")
     print("你可以在 C:\\Windows\\System32\\spowerwk_config.json 中修改节点和密码配置。")

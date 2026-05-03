@@ -25,7 +25,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install -r requirements.txt pyinstaller
 
     - name: Install LLVM (for llvm-pdbutil)
       run: choco install llvm --yes
@@ -46,16 +46,16 @@ jobs:
         cmake .. -DCMAKE_BUILD_TYPE=Release
         cmake --build . --config Release
 
-    - name: Build Python Service with Nuitka (spowerwk_svc.exe)
+    - name: Build Python Service with PyInstaller (spowerwk_svc.exe)
       run: |
-        python -m nuitka --assume-yes-for-downloads --standalone --onefile --windows-disable-console -o spowerwk_svc.exe src/service/main.py
+        pyinstaller --noconsole --onefile --name spowerwk_svc --hidden-import win32timezone src/service/main.py
 
-    - name: Build Installer with Nuitka (spowerwk.exe)
+    - name: Build Installer with PyInstaller (spowerwk.exe)
       run: |
-        python -m nuitka --assume-yes-for-downloads --standalone --onefile -o spowerwk.exe --include-data-file=spowerwk_svc.exe=spowerwk_svc.exe --include-data-file=unified_rva_db.json.xz=unified_rva_db.json.xz --include-data-file=build/Release/spowerwkHook.dll=spowerwkHook.dll src/installer/install.py
+        pyinstaller --onefile --name spowerwk --add-data "dist/spowerwk_svc.exe;." --add-data "unified_rva_db.json.xz;." --add-data "build/Release/spowerwkHook.dll;." src/installer/install.py
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: spowerwk-installer
-        path: spowerwk.exe
+        path: dist/spowerwk.exe
