@@ -216,35 +216,24 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
         }
     }
 
-    MH_EnableHook(MH_ALL_HOOKS);
-    LogToPipe("InitThread: All hooks enabled.");
-
     // --- CFG (Control Flow Guard) fix ---
+    // CRITICAL: Must run BEFORE MH_EnableHook.
     // MinHook allocates trampoline memory dynamically. This memory is NOT registered
     // in the CFG bitmap, so any indirect call through the trampoline causes
     // FAST_FAIL_GUARD_ICALL_CHECK_FAILURE and kills winlogon.exe.
-    // We register the entire trampoline page (and our detour page) as valid targets.
+    // MH_CreateHook already filled in Original_* with the trampoline addresses,
+    // so we can register them now, before any hook is active and callable.
     {
         HANDLE hProcess = GetCurrentProcess();
-        // Register all CFG_CALL_TARGET_INFO entries on a given memory page.
-        // CFG requires offsets to be 16-byte aligned.
         auto RegisterPageAsCfgValid = [&](void* addr) {
             if (!addr) return;
-            
-            // Dynamically load SetProcessValidCallTargets to avoid linker errors
-            // and support older OS versions (like Win7) that don't have CFG.
             typedef BOOL (WINAPI *pSetProcessValidCallTargets)(HANDLE, PVOID, SIZE_T, ULONG, PCFG_CALL_TARGET_INFO);
-            static pSetProcessValidCallTargets fnSetProcessValidCallTargets = 
+            static pSetProcessValidCallTargets fnSetProcessValidCallTargets =
                 (pSetProcessValidCallTargets)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessValidCallTargets");
-                
-            if (!fnSetProcessValidCallTargets) {
-                // CFG not supported on this OS, ignore.
-                return;
-            }
+            if (!fnSetProcessValidCallTargets) return; // CFG not supported on this OS
 
             ULONG_PTR base = (ULONG_PTR)addr & ~(ULONG_PTR)(0xFFF); // page-align
             const ULONG_PTR pageSize = 0x1000;
-            // Build one entry per 16-byte slot on the page
             const ULONG nSlots = (ULONG)(pageSize / 16);
             CFG_CALL_TARGET_INFO* entries = new CFG_CALL_TARGET_INFO[nSlots];
             for (ULONG i = 0; i < nSlots; i++) {
@@ -254,22 +243,25 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
             BOOL ok = fnSetProcessValidCallTargets(hProcess, (PVOID)base, pageSize, nSlots, entries);
             delete[] entries;
             if (!ok) {
-                DWORD err = GetLastError();
-                LogToPipe("InitThread: SetProcessValidCallTargets failed err=" + std::to_string(err));
+                LogToPipe("InitThread: SetProcessValidCallTargets failed err=" + std::to_string(GetLastError()));
             } else {
                 LogToPipe("InitThread: CFG page registered base=" + std::to_string(base));
             }
         };
 
-        // Register trampoline pages (the "Original_*" pointers point into MinHook's trampoline)
+        // Register trampoline pages — Original_* already point into MinHook's trampoline
+        // after MH_CreateHook, even before Enable.
         RegisterPageAsCfgValid((void*)Original_ShutdownWindowsWorkerThread);
         RegisterPageAsCfgValid((void*)Original_WlDisplayStatusByResourceId);
-
-        // Register our own detour functions (in DLL image, usually already valid, but be safe)
+        // Register our own detour pages (in DLL image, but register defensively)
         RegisterPageAsCfgValid((void*)&Hooked_ShutdownWindowsWorkerThread);
         RegisterPageAsCfgValid((void*)&Hooked_WlDisplayStatusByResourceId);
     }
-    LogToPipe("InitThread: CFG registration complete. DLL init complete.");
+    LogToPipe("InitThread: CFG registration complete.");
+
+    // Enable hooks AFTER CFG registration so trampolines are valid before any call.
+    MH_EnableHook(MH_ALL_HOOKS);
+    LogToPipe("InitThread: All hooks enabled. DLL init complete.");
 
     // 4. Heartbeat loop
     while (true) {
