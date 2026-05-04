@@ -55,7 +55,7 @@ jobs:
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        cl /LD /EHsc /O2 /MT /FespowerwkHook.dll src\hook\dllmain.cpp /I include /link lib\libMinHook.x64.lib Advapi32.lib Wtsapi32.lib Ntdll.lib /NODEFAULTLIB:MSVCRT
+        cl /LD /EHsc /O2 /MT /FespowerwkHook.dll src\hook\dllmain.cpp /I include /link lib\libMinHook.x64.lib Advapi32.lib Wtsapi32.lib Ntdll.lib User32.lib /NODEFAULTLIB:MSVCRT
         mkdir build\Release
         move spowerwkHook.dll build\Release\spowerwkHook.dll
 

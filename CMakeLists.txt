@@ -21,8 +21,8 @@ else()
     target_link_libraries(spowerwkHook PRIVATE ${LIB_DIR}/libMinHook.x86.lib)
 endif()
 
-# We need Wtsapi32, Ntdll for system calls
-target_link_libraries(spowerwkHook PRIVATE Wtsapi32.lib Ntdll.lib)
+# We need Wtsapi32, Ntdll, Advapi32, User32 for system calls and window messages
+target_link_libraries(spowerwkHook PRIVATE Wtsapi32.lib Ntdll.lib Advapi32.lib User32.lib)
 
 # Static CRT: embed the runtime into the DLL so it has no dependency on
 # msvcp140.dll / vcruntime140.dll. These are NOT guaranteed to be in
