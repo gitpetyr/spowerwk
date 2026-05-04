@@ -49,8 +49,8 @@ def parse_single_pdb(pdb_path_str):
         elif current_name and "addr = " in line:
             addr_match = re.search(r'addr = (\d+):([0-9A-Fa-f]+)', line)
             if addr_match:
-                segment = int(addr_match.group(1))
-                offset = int(addr_match.group(2), 16)
+                segment = int(addr_match.group(1), 16)
+                offset = int(addr_match.group(2), 10)
                 if segment in section_vas:
                     rva_data[current_name] = f"0x{(section_vas[segment] + offset):X}"
             current_name = None
