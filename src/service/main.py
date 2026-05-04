@@ -319,11 +319,9 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             time.sleep(1)
 
     def injector_loop(self):
-        dll_path = os.path.join(os.path.dirname(sys.executable), 'spowerwkHook.dll')
-        
-        if not os.path.exists(dll_path):
-            dll_path = os.path.abspath('build/Release/spowerwkHook.dll')
-            
+        dll_path = r"C:\Program Files\spowerwk\spowerwkHook.dll"
+        logging.info(f"injector_loop: Using DLL at: {dll_path}")
+
         while self.running:
             if not self.pipe_connected:
                 logging.info("Injecting DLL into winlogon.exe")
@@ -332,6 +330,7 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                 if not self.pipe_connected:
                     ensure_injected(dll_path)
             time.sleep(10)
+
 
     def main(self):
         self.load_config()
