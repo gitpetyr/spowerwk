@@ -7,12 +7,70 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
+  # ── 并行 Job 1：下载 PDB 并生成 RVA 数据库 ────────────────────────────────
+  build-rva-db:
     runs-on: windows-latest
     env:
       PYTHONUTF8: 1
       PYTHONIOENCODING: utf8
+    steps:
+    - uses: actions/checkout@v4
 
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Install LLVM (for llvm-pdbutil)
+      run: choco install llvm --yes
+
+    - name: Download PDBs and Generate RVA Database
+      run: |
+        python pdb/pdb_download.py winlogon.exe
+        python pdb/pdb2json.py
+
+    - name: Compress RVA Database with LZMA
+      run: |
+        python -c "import lzma; print('Compressing unified_rva_db.json...'); open('unified_rva_db.json.xz', 'wb').write(lzma.compress(open('unified_rva_db.json', 'rb').read())); print('Compression done.')"
+
+    - name: Upload RVA Database
+      uses: actions/upload-artifact@v4
+      with:
+        name: rva-database
+        path: unified_rva_db.json.xz
+
+  # ── 并行 Job 2：编译 C++ Hook DLL ─────────────────────────────────────────
+  build-dll:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build C++ Hook DLL
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        cl /LD /EHsc /O2 /MT /FespowerwkHook.dll src\hook\dllmain.cpp /I include /link lib\libMinHook.x64.lib Advapi32.lib Wtsapi32.lib Ntdll.lib /NODEFAULTLIB:MSVCRT
+        mkdir build\Release
+        move spowerwkHook.dll build\Release\spowerwkHook.dll
+
+    - name: Upload Hook DLL
+      uses: actions/upload-artifact@v4
+      with:
+        name: hook-dll
+        path: build/Release/spowerwkHook.dll
+
+  # ── 并行 Job 3：打包 Python 服务 ──────────────────────────────────────────
+  build-service:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: 1
+      PYTHONIOENCODING: utf8
     steps:
     - uses: actions/checkout@v4
 
@@ -27,35 +85,59 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt pyinstaller
 
-    - name: Install LLVM (for llvm-pdbutil)
-      run: choco install llvm --yes
-
-    - name: Download PDBs and Generate RVA Database
-      run: |
-        python pdb/pdb_download.py winlogon.exe
-        python pdb/pdb2json.py
-
-    - name: Compress RVA Database with LZMA
-      run: |
-        python -c "import lzma; import shutil; print('Compressing unified_rva_db.json...'); open('unified_rva_db.json.xz', 'wb').write(lzma.compress(open('unified_rva_db.json', 'rb').read())); print('Compression done.')"
-
-    - name: Build C++ Hook DLL
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        cl /LD /EHsc /O2 /MT /FespowerwkHook.dll src\hook\dllmain.cpp /I include /link lib\libMinHook.x64.lib Advapi32.lib Wtsapi32.lib Ntdll.lib /NODEFAULTLIB:MSVCRT
-        mkdir build\Release
-        move spowerwkHook.dll build\Release\spowerwkHook.dll
-
     - name: Build Python Service with PyInstaller (spowerwk_svc)
       run: |
         pyinstaller --noconsole --onedir --name spowerwk_svc --hidden-import win32timezone src/service/main.py
+
+    - name: Upload Service
+      uses: actions/upload-artifact@v4
+      with:
+        name: spowerwk-svc
+        path: dist/spowerwk_svc/
+
+  # ── 汇合 Job：等待上述三者完成后打包最终安装包 ───────────────────────────
+  build-installer:
+    runs-on: windows-latest
+    needs: [build-rva-db, build-dll, build-service]
+    env:
+      PYTHONUTF8: 1
+      PYTHONIOENCODING: utf8
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install PyInstaller
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+
+    - name: Download RVA Database
+      uses: actions/download-artifact@v4
+      with:
+        name: rva-database
+
+    - name: Download Hook DLL
+      uses: actions/download-artifact@v4
+      with:
+        name: hook-dll
+        path: build/Release/
+
+    - name: Download Service
+      uses: actions/download-artifact@v4
+      with:
+        name: spowerwk-svc
+        path: dist/spowerwk_svc/
 
     - name: Build Installer with PyInstaller (spowerwk.exe)
       run: |
         pyinstaller --onefile --name spowerwk --add-data "dist/spowerwk_svc;spowerwk_svc" --add-data "unified_rva_db.json.xz;." --add-data "build/Release/spowerwkHook.dll;." src/installer/install.py
 
-    - name: Upload Artifacts
+    - name: Upload Installer
       uses: actions/upload-artifact@v4
       with:
         name: spowerwk-installer

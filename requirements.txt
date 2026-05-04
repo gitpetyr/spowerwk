@@ -3,3 +3,4 @@ nuitka==2.1.2
 pywin32>=307
 cryptography>=46.0.6 # fix github dependabot vulnerabilities
 psutil
+wmi
