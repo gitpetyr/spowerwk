@@ -3,6 +3,7 @@ import ctypes.wintypes
 import psutil
 import os
 import time
+import logging
 
 kernel32 = ctypes.windll.kernel32
 
@@ -69,35 +70,58 @@ def is_dll_injected(pid: int, dll_name: str) -> bool:
 
 def inject_dll(pid, dll_path):
     if not os.path.exists(dll_path):
+        logging.error(f"inject_dll: DLL not found at path: {dll_path}")
         return False
 
     # Use UTF-16LE + LoadLibraryW so paths with non-ASCII characters work.
     dll_path_bytes = (dll_path + '\0').encode('utf-16-le')
     h_process = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
     if not h_process:
+        err = ctypes.get_last_error()
+        logging.error(f"inject_dll: OpenProcess(pid={pid}) failed. LastError={err}")
         return False
 
     arg_address = kernel32.VirtualAllocEx(h_process, None, len(dll_path_bytes),
                                            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
     if not arg_address:
+        err = ctypes.get_last_error()
+        logging.error(f"inject_dll: VirtualAllocEx failed. LastError={err}")
         kernel32.CloseHandle(h_process)
         return False
 
     written = ctypes.c_size_t(0)
-    kernel32.WriteProcessMemory(h_process, arg_address, dll_path_bytes,
-                                 len(dll_path_bytes), ctypes.byref(written))
+    ok = kernel32.WriteProcessMemory(h_process, arg_address, dll_path_bytes,
+                                     len(dll_path_bytes), ctypes.byref(written))
+    if not ok or written.value != len(dll_path_bytes):
+        err = ctypes.get_last_error()
+        logging.error(f"inject_dll: WriteProcessMemory failed (wrote {written.value}/{len(dll_path_bytes)} bytes). LastError={err}")
+        kernel32.VirtualFreeEx(h_process, arg_address, 0, MEM_RELEASE)
+        kernel32.CloseHandle(h_process)
+        return False
 
     h_kernel32 = kernel32.GetModuleHandleW("kernel32.dll")
     # Use LoadLibraryW to match the UTF-16LE path encoding
     h_loadlib = kernel32.GetProcAddress(h_kernel32, b"LoadLibraryW")
+    if not h_loadlib:
+        logging.error("inject_dll: GetProcAddress(LoadLibraryW) returned NULL")
+        kernel32.VirtualFreeEx(h_process, arg_address, 0, MEM_RELEASE)
+        kernel32.CloseHandle(h_process)
+        return False
 
     thread_id = ctypes.wintypes.DWORD(0)
     h_thread = kernel32.CreateRemoteThread(h_process, None, 0, h_loadlib,
                                             arg_address, 0, ctypes.byref(thread_id))
+    if not h_thread:
+        err = ctypes.get_last_error()
+        logging.error(f"inject_dll: CreateRemoteThread failed. LastError={err}")
+        kernel32.VirtualFreeEx(h_process, arg_address, 0, MEM_RELEASE)
+        kernel32.CloseHandle(h_process)
+        return False
 
-    if h_thread:
-        kernel32.WaitForSingleObject(h_thread, 5000)
-        kernel32.CloseHandle(h_thread)
+    wait_result = kernel32.WaitForSingleObject(h_thread, 5000)
+    if wait_result != 0:  # WAIT_OBJECT_0 == 0
+        logging.warning(f"inject_dll: WaitForSingleObject returned {wait_result:#x} (timeout or error)")
+    kernel32.CloseHandle(h_thread)
 
     kernel32.VirtualFreeEx(h_process, arg_address, 0, MEM_RELEASE)
     kernel32.CloseHandle(h_process)
@@ -106,6 +130,7 @@ def inject_dll(pid, dll_path):
 def ensure_injected(dll_path):
     pid = get_pid("winlogon.exe")
     if not pid:
+        logging.warning("ensure_injected: winlogon.exe not found, skipping injection.")
         return
 
     # Bug #7 fix: check whether the DLL is already loaded before injecting again.
@@ -113,6 +138,12 @@ def ensure_injected(dll_path):
     # MH_Initialize() calls and undefined hook behavior that can crash winlogon.exe.
     dll_basename = os.path.basename(dll_path).lower()
     if is_dll_injected(pid, dll_basename):
+        logging.debug(f"ensure_injected: {dll_basename} already present in winlogon.exe (pid={pid}), skipping.")
         return
 
-    inject_dll(pid, dll_path)
+    logging.info(f"ensure_injected: Injecting {dll_basename} into winlogon.exe (pid={pid})...")
+    success = inject_dll(pid, dll_path)
+    if success:
+        logging.info(f"ensure_injected: Injection of {dll_basename} succeeded (pid={pid}).")
+    else:
+        logging.error(f"ensure_injected: Injection of {dll_basename} FAILED (pid={pid}).")

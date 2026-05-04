@@ -7,14 +7,30 @@
 #include <mutex>
 
 std::mutex g_logMutex;
+HANDLE g_hPipe = INVALID_HANDLE_VALUE;
 
+// Log via IPC pipe so the Python service writes to the unified log file.
+// Falls back to C:\Users\Public\spowerwk_dll.log only when pipe is unavailable
+// (e.g. very early init before connection is established).
 void LogToFile(const std::string& msg) {
     std::lock_guard<std::mutex> lock(g_logMutex);
-    // Use C:\Users\Public instead of System32 to avoid any permission/protection issues
     std::ofstream ofs("C:\\Users\\Public\\spowerwk_dll.log", std::ios_base::app);
     if (ofs.is_open()) {
         ofs << msg << std::endl;
     }
+}
+
+void LogToPipe(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    if (g_hPipe == INVALID_HANDLE_VALUE) {
+        // Pipe not yet open; use file fallback.
+        std::ofstream ofs("C:\\Users\\Public\\spowerwk_dll.log", std::ios_base::app);
+        if (ofs.is_open()) ofs << "[pre-pipe] " << msg << std::endl;
+        return;
+    }
+    std::string packet = "LOG:" + msg + "\0";
+    DWORD written;
+    WriteFile(g_hPipe, packet.c_str(), (DWORD)packet.size(), &written, NULL);
 }
 
 // NtShutdownSystem
@@ -28,7 +44,6 @@ extern "C" NTSYSAPI NTSTATUS NTAPI NtShutdownSystem(SHUTDOWN_ACTION Action);
 
 // Global state
 bool g_isGhostMode = false;
-HANDLE g_hPipe = INVALID_HANDLE_VALUE;
 
 // Original functions
 typedef void(__fastcall* tShutdownWindowsWorkerThread)(PTP_CALLBACK_INSTANCE Instance, PVOID Context);
@@ -45,7 +60,7 @@ bool AskPythonServiceToBlockShutdown() {
     // Include null terminator so Python's strip('\x00') and strcmp work correctly
     const char* req = "QUERY_SHUTDOWN\0";
     if (!WriteFile(g_hPipe, req, strlen(req) + 1, &bytesWritten, NULL)) {
-        LogToFile("AskPythonServiceToBlockShutdown: Failed to write QUERY_SHUTDOWN to pipe.");
+        LogToPipe("AskPythonServiceToBlockShutdown: Failed to write QUERY_SHUTDOWN to pipe.");
         return false;
     }
 
@@ -53,16 +68,16 @@ bool AskPythonServiceToBlockShutdown() {
     DWORD bytesRead;
     if (ReadFile(g_hPipe, buf, sizeof(buf) - 1, &bytesRead, NULL)) {
         if (strcmp(buf, "BLOCK") == 0) {
-            LogToFile("AskPythonServiceToBlockShutdown: Received strict BLOCK from service.");
+            LogToPipe("AskPythonServiceToBlockShutdown: Received strict BLOCK from service.");
             return true;
         } else if (strcmp(buf, "ALLOW") == 0) {
-            LogToFile("AskPythonServiceToBlockShutdown: Received strict ALLOW from service.");
+            LogToPipe("AskPythonServiceToBlockShutdown: Received strict ALLOW from service.");
             return false;
         } else {
-            LogToFile(std::string("AskPythonServiceToBlockShutdown: Received unknown response: ") + buf);
+            LogToPipe(std::string("AskPythonServiceToBlockShutdown: Received unknown response: ") + buf);
         }
     } else {
-        LogToFile("AskPythonServiceToBlockShutdown: Failed to read response from pipe.");
+        LogToPipe("AskPythonServiceToBlockShutdown: Failed to read response from pipe.");
     }
     
     // Fail-open: if service is unreachable or gives unknown response, allow shutdown.
@@ -70,9 +85,10 @@ bool AskPythonServiceToBlockShutdown() {
 }
 
 // Hooked ShutdownWindowsWorkerThread
+__declspec(guard(nocf))
 void __fastcall Hooked_ShutdownWindowsWorkerThread(PTP_CALLBACK_INSTANCE Instance, PVOID Context) {
     if (g_isGhostMode) {
-        LogToFile("Hooked_ShutdownWindowsWorkerThread: Ghost mode active. Secondary call detected. Triggering hard reboot!");
+        LogToPipe("Hooked_ShutdownWindowsWorkerThread: Ghost mode active. Secondary call detected. Triggering hard reboot!");
         // This is a secondary call (e.g. ACPI power button pressed during ghost mode)
         // Hard reboot to penalize/handle the physical button press
         // Acquire SeShutdownPrivilege
@@ -84,28 +100,29 @@ void __fastcall Hooked_ShutdownWindowsWorkerThread(PTP_CALLBACK_INSTANCE Instanc
         tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
         AdjustTokenPrivileges(hToken, FALSE, &tkp, 0, (PTOKEN_PRIVILEGES)NULL, 0);
         
-        LogToFile("Hooked_ShutdownWindowsWorkerThread: Reboot initiated.");
+        LogToPipe("Hooked_ShutdownWindowsWorkerThread: Reboot initiated.");
         NtShutdownSystem(ShutdownReboot);
         return; // We shouldn't reach here
     }
 
-    LogToFile("Hooked_ShutdownWindowsWorkerThread: Intercepted primary shutdown call. Querying Service...");
+    LogToPipe("Hooked_ShutdownWindowsWorkerThread: Intercepted primary shutdown call. Querying Service...");
     if (AskPythonServiceToBlockShutdown()) {
-        LogToFile("Service replied BLOCK. Entering Ghost Mode and spoofing context.");
+        LogToPipe("Service replied BLOCK. Entering Ghost Mode and spoofing context.");
         g_isGhostMode = true;
         // Modify Context to force Logout (0) instead of Shutdown/Reboot
         Original_ShutdownWindowsWorkerThread(Instance, (PVOID)0);
     } else {
-        LogToFile("Service replied ALLOW. Permitting normal shutdown.");
+        LogToPipe("Service replied ALLOW. Permitting normal shutdown.");
         // Allow normal shutdown
         Original_ShutdownWindowsWorkerThread(Instance, Context);
     }
 }
 
 // Hooked WlDisplayStatusByResourceId
+__declspec(guard(nocf))
 __int64 __fastcall Hooked_WlDisplayStatusByResourceId(unsigned int a1, unsigned int a2, unsigned int a3, PVOID a4) {
     if (g_isGhostMode && a1 == 1003) {
-        LogToFile("Hooked_WlDisplayStatusByResourceId: Spoofing logout UI (1003) to shutdown UI (1204).");
+        LogToPipe("Hooked_WlDisplayStatusByResourceId: Spoofing logout UI (1003) to shutdown UI (1204).");
         // If we are in ghost mode (forced logout) and it tries to display "Logging off" (1003)
         // We spoof it to "Shutting down" (1204)
         a1 = 1204;
@@ -125,19 +142,22 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
         Sleep(1000);
     }
 
+    LogToPipe("InitThread: Connected to IPC pipe.");
+
     // 2. Python service will send RVAs once connected
     // Format: "RVA:<ShutdownRVA>:<DisplayRVA>"
     char buf[128] = { 0 };
     DWORD bytesRead;
     if (!ReadFile(g_hPipe, buf, sizeof(buf) - 1, &bytesRead, NULL)) {
+        LogToPipe("InitThread: Failed to read RVA message from pipe.");
         CloseHandle(g_hPipe);
         return 0;
     }
 
     std::string msg(buf);
-    LogToFile("InitThread: Received RVAs: " + msg);
+    LogToPipe("InitThread: Received RVAs: " + msg);
     if (msg.rfind("RVA:", 0) != 0) {
-        LogToFile("InitThread: Invalid RVA format.");
+        LogToPipe("InitThread: Invalid RVA format.");
         CloseHandle(g_hPipe);
         return 0;
     }
@@ -159,6 +179,7 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
     // Get winlogon.exe base address
     HMODULE hModule = GetModuleHandleA(NULL);
     if (!hModule) {
+        LogToPipe("InitThread: GetModuleHandleA returned NULL.");
         CloseHandle(g_hPipe);
         return 0;
     }
@@ -166,35 +187,36 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
     void* targetShutdown = (void*)((uintptr_t)hModule + shutdownRva);
     void* targetDisplay = (void*)((uintptr_t)hModule + displayRva);
 
-    LogToFile("InitThread: Target Shutdown Address: " + std::to_string((uintptr_t)targetShutdown));
+    LogToPipe("InitThread: Target Shutdown Address: " + std::to_string((uintptr_t)targetShutdown));
 
     // 3. Initialize MinHook and create hooks
     if (MH_Initialize() != MH_OK) {
-        LogToFile("InitThread: MH_Initialize failed.");
+        LogToPipe("InitThread: MH_Initialize failed.");
         CloseHandle(g_hPipe);
         return 0;
     }
-    LogToFile("InitThread: MH_Initialize success.");
+    LogToPipe("InitThread: MH_Initialize success.");
 
     if (shutdownRva != 0) {
         if (MH_CreateHook(targetShutdown, &Hooked_ShutdownWindowsWorkerThread, reinterpret_cast<LPVOID*>(&Original_ShutdownWindowsWorkerThread)) == MH_OK) {
-            LogToFile("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread success.");
+            LogToPipe("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread success.");
         } else {
-            LogToFile("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread failed.");
+            LogToPipe("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread failed.");
         }
     } else {
-        LogToFile("InitThread: shutdownRva is 0, skipping hook.");
+        LogToPipe("InitThread: shutdownRva is 0, skipping hook.");
     }
 
     if (displayRva != 0) {
         if (MH_CreateHook(targetDisplay, &Hooked_WlDisplayStatusByResourceId, reinterpret_cast<LPVOID*>(&Original_WlDisplayStatusByResourceId)) == MH_OK) {
-            LogToFile("InitThread: MH_CreateHook for WlDisplayStatusByResourceId success.");
+            LogToPipe("InitThread: MH_CreateHook for WlDisplayStatusByResourceId success.");
         } else {
-            LogToFile("InitThread: MH_CreateHook for WlDisplayStatusByResourceId failed.");
+            LogToPipe("InitThread: MH_CreateHook for WlDisplayStatusByResourceId failed.");
         }
     }
 
     MH_EnableHook(MH_ALL_HOOKS);
+    LogToPipe("InitThread: All hooks enabled. DLL init complete.");
 
     // 4. Heartbeat loop
     while (true) {
@@ -211,6 +233,7 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
     CloseHandle(g_hPipe);
+    g_hPipe = INVALID_HANDLE_VALUE;
     FreeLibraryAndExitThread((HMODULE)lpParam, 0);
     return 0;
 }

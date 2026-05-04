@@ -281,7 +281,10 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                             if not req:
                                 continue
                                 
-                            if req == "QUERY_SHUTDOWN":
+                            if req.startswith("LOG:"):
+                                logging.info(f"[DLL] {req[4:]}")
+                                
+                            elif req == "QUERY_SHUTDOWN":
                                 logging.info("Received QUERY_SHUTDOWN from DLL")
                                 allow = self.p2p.negotiate_shutdown()
                                 if allow:
