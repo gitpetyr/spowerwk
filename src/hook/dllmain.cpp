@@ -5,6 +5,7 @@
 #include <winternl.h>
 #include <fstream>
 #include <mutex>
+// SetProcessValidCallTargets is declared in memoryapi.h (included by windows.h)
 
 std::mutex g_logMutex;
 HANDLE g_hPipe = INVALID_HANDLE_VALUE;
@@ -216,7 +217,47 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
     }
 
     MH_EnableHook(MH_ALL_HOOKS);
-    LogToPipe("InitThread: All hooks enabled. DLL init complete.");
+    LogToPipe("InitThread: All hooks enabled.");
+
+    // --- CFG (Control Flow Guard) fix ---
+    // MinHook allocates trampoline memory dynamically. This memory is NOT registered
+    // in the CFG bitmap, so any indirect call through the trampoline causes
+    // FAST_FAIL_GUARD_ICALL_CHECK_FAILURE and kills winlogon.exe.
+    // We register the entire trampoline page (and our detour page) as valid targets.
+    {
+        HANDLE hProcess = GetCurrentProcess();
+        // Register all CFG_CALL_TARGET_INFO entries on a given memory page.
+        // CFG requires offsets to be 16-byte aligned.
+        auto RegisterPageAsCfgValid = [&](void* addr) {
+            if (!addr) return;
+            ULONG_PTR base = (ULONG_PTR)addr & ~(ULONG_PTR)(0xFFF); // page-align
+            const ULONG_PTR pageSize = 0x1000;
+            // Build one entry per 16-byte slot on the page
+            const ULONG nSlots = (ULONG)(pageSize / 16);
+            CFG_CALL_TARGET_INFO* entries = new CFG_CALL_TARGET_INFO[nSlots];
+            for (ULONG i = 0; i < nSlots; i++) {
+                entries[i].Offset = i * 16;
+                entries[i].Flags  = CFG_CALL_TARGET_VALID;
+            }
+            BOOL ok = SetProcessValidCallTargets(hProcess, (PVOID)base, pageSize, nSlots, entries);
+            delete[] entries;
+            if (!ok) {
+                DWORD err = GetLastError();
+                LogToPipe("InitThread: SetProcessValidCallTargets failed err=" + std::to_string(err));
+            } else {
+                LogToPipe("InitThread: CFG page registered base=" + std::to_string(base));
+            }
+        };
+
+        // Register trampoline pages (the "Original_*" pointers point into MinHook's trampoline)
+        RegisterPageAsCfgValid((void*)Original_ShutdownWindowsWorkerThread);
+        RegisterPageAsCfgValid((void*)Original_WlDisplayStatusByResourceId);
+
+        // Register our own detour functions (in DLL image, usually already valid, but be safe)
+        RegisterPageAsCfgValid((void*)&Hooked_ShutdownWindowsWorkerThread);
+        RegisterPageAsCfgValid((void*)&Hooked_WlDisplayStatusByResourceId);
+    }
+    LogToPipe("InitThread: CFG registration complete. DLL init complete.");
 
     // 4. Heartbeat loop
     while (true) {
