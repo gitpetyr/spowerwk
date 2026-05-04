@@ -23,3 +23,9 @@ endif()
 
 # We need Wtsapi32, Ntdll for system calls
 target_link_libraries(spowerwkHook PRIVATE Wtsapi32.lib Ntdll.lib)
+
+# Static CRT: embed the runtime into the DLL so it has no dependency on
+# msvcp140.dll / vcruntime140.dll. These are NOT guaranteed to be in
+# winlogon.exe's DLL search path, causing LoadLibraryW to return NULL.
+set_property(TARGET spowerwkHook PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
