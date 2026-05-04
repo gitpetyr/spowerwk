@@ -133,7 +133,10 @@ __int64 __fastcall Hooked_WlDisplayStatusByResourceId(unsigned int a1, unsigned 
 
 // Initialization Thread
 DWORD WINAPI InitThread(LPVOID lpParam) {
+    LogToFile("InitThread: Started.");
+
     // 1. Connect to named pipe created by Python service
+    LogToFile("InitThread: Entering pipe connect loop.");
     while (true) {
         g_hPipe = CreateFileA("\\\\.\\pipe\\spowerwk_ipc", GENERIC_READ | GENERIC_WRITE,
             0, NULL, OPEN_EXISTING, 0, NULL);
@@ -142,22 +145,28 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
         }
         Sleep(1000);
     }
+    LogToFile("InitThread: Pipe connected. Sending log via pipe.");
 
     LogToPipe("InitThread: Connected to IPC pipe.");
+    LogToFile("InitThread: Log sent via pipe. Waiting for RVA message.");
 
     // 2. Python service will send RVAs once connected
-    // Format: "RVA:<ShutdownRVA>:<DisplayRVA>"
     char buf[128] = { 0 };
     DWORD bytesRead;
     if (!ReadFile(g_hPipe, buf, sizeof(buf) - 1, &bytesRead, NULL)) {
+        LogToFile("InitThread: ReadFile for RVA FAILED. err=" + std::to_string(GetLastError()));
         LogToPipe("InitThread: Failed to read RVA message from pipe.");
         CloseHandle(g_hPipe);
         return 0;
     }
+    LogToFile("InitThread: ReadFile for RVA succeeded. bytes=" + std::to_string(bytesRead));
 
     std::string msg(buf);
     LogToPipe("InitThread: Received RVAs: " + msg);
+    LogToFile("InitThread: RVA msg=" + msg);
+
     if (msg.rfind("RVA:", 0) != 0) {
+        LogToFile("InitThread: Invalid RVA format, aborting.");
         LogToPipe("InitThread: Invalid RVA format.");
         CloseHandle(g_hPipe);
         return 0;
@@ -167,62 +176,75 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
     size_t secondColon = msg.find(':', firstColon + 1);
 
     if (firstColon == std::string::npos || secondColon == std::string::npos) {
+        LogToFile("InitThread: Colon parse failed.");
         CloseHandle(g_hPipe);
         return 0;
     }
 
     std::string shutdownRvaStr = msg.substr(firstColon + 1, secondColon - firstColon - 1);
-    std::string displayRvaStr = msg.substr(secondColon + 1);
+    std::string displayRvaStr  = msg.substr(secondColon + 1);
+    // strip null terminator if present
+    if (!displayRvaStr.empty() && displayRvaStr.back() == '\0') displayRvaStr.pop_back();
+
+    LogToFile("InitThread: shutdownRvaStr=" + shutdownRvaStr + " displayRvaStr=" + displayRvaStr);
 
     uint64_t shutdownRva = std::stoull(shutdownRvaStr, nullptr, 16);
-    uint64_t displayRva = std::stoull(displayRvaStr, nullptr, 16);
+    uint64_t displayRva  = std::stoull(displayRvaStr,  nullptr, 16);
 
-    // Get winlogon.exe base address
     HMODULE hModule = GetModuleHandleA(NULL);
     if (!hModule) {
+        LogToFile("InitThread: GetModuleHandleA returned NULL.");
         LogToPipe("InitThread: GetModuleHandleA returned NULL.");
         CloseHandle(g_hPipe);
         return 0;
     }
 
     void* targetShutdown = (void*)((uintptr_t)hModule + shutdownRva);
-    void* targetDisplay = (void*)((uintptr_t)hModule + displayRva);
+    void* targetDisplay  = (void*)((uintptr_t)hModule + displayRva);
 
+    LogToFile("InitThread: base=" + std::to_string((uintptr_t)hModule)
+        + " targetShutdown=" + std::to_string((uintptr_t)targetShutdown)
+        + " targetDisplay="  + std::to_string((uintptr_t)targetDisplay));
     LogToPipe("InitThread: Target Shutdown Address: " + std::to_string((uintptr_t)targetShutdown));
 
-    // 3. Initialize MinHook and create hooks
-    if (MH_Initialize() != MH_OK) {
+    // 3. MH_Initialize
+    LogToFile("InitThread: Calling MH_Initialize...");
+    MH_STATUS mhInit = MH_Initialize();
+    LogToFile("InitThread: MH_Initialize returned " + std::to_string((int)mhInit));
+    if (mhInit != MH_OK) {
         LogToPipe("InitThread: MH_Initialize failed.");
         CloseHandle(g_hPipe);
         return 0;
     }
     LogToPipe("InitThread: MH_Initialize success.");
 
+    // MH_CreateHook - Shutdown
     if (shutdownRva != 0) {
-        if (MH_CreateHook(targetShutdown, &Hooked_ShutdownWindowsWorkerThread, reinterpret_cast<LPVOID*>(&Original_ShutdownWindowsWorkerThread)) == MH_OK) {
-            LogToPipe("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread success.");
-        } else {
-            LogToPipe("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread failed.");
-        }
+        LogToFile("InitThread: Calling MH_CreateHook for ShutdownWindowsWorkerThread...");
+        MH_STATUS s = MH_CreateHook(targetShutdown,
+            &Hooked_ShutdownWindowsWorkerThread,
+            reinterpret_cast<LPVOID*>(&Original_ShutdownWindowsWorkerThread));
+        LogToFile("InitThread: MH_CreateHook Shutdown returned " + std::to_string((int)s));
+        if (s == MH_OK) LogToPipe("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread success.");
+        else            LogToPipe("InitThread: MH_CreateHook for ShutdownWindowsWorkerThread failed err=" + std::to_string((int)s));
     } else {
+        LogToFile("InitThread: shutdownRva is 0, skipping hook.");
         LogToPipe("InitThread: shutdownRva is 0, skipping hook.");
     }
 
+    // MH_CreateHook - Display
     if (displayRva != 0) {
-        if (MH_CreateHook(targetDisplay, &Hooked_WlDisplayStatusByResourceId, reinterpret_cast<LPVOID*>(&Original_WlDisplayStatusByResourceId)) == MH_OK) {
-            LogToPipe("InitThread: MH_CreateHook for WlDisplayStatusByResourceId success.");
-        } else {
-            LogToPipe("InitThread: MH_CreateHook for WlDisplayStatusByResourceId failed.");
-        }
+        LogToFile("InitThread: Calling MH_CreateHook for WlDisplayStatusByResourceId...");
+        MH_STATUS s = MH_CreateHook(targetDisplay,
+            &Hooked_WlDisplayStatusByResourceId,
+            reinterpret_cast<LPVOID*>(&Original_WlDisplayStatusByResourceId));
+        LogToFile("InitThread: MH_CreateHook Display returned " + std::to_string((int)s));
+        if (s == MH_OK) LogToPipe("InitThread: MH_CreateHook for WlDisplayStatusByResourceId success.");
+        else            LogToPipe("InitThread: MH_CreateHook for WlDisplayStatusByResourceId failed err=" + std::to_string((int)s));
     }
 
-    // --- CFG (Control Flow Guard) fix ---
-    // CRITICAL: Must run BEFORE MH_EnableHook.
-    // MinHook allocates trampoline memory dynamically. This memory is NOT registered
-    // in the CFG bitmap, so any indirect call through the trampoline causes
-    // FAST_FAIL_GUARD_ICALL_CHECK_FAILURE and kills winlogon.exe.
-    // MH_CreateHook already filled in Original_* with the trampoline addresses,
-    // so we can register them now, before any hook is active and callable.
+    // --- CFG fix ---
+    LogToFile("InitThread: Starting CFG registration...");
     {
         HANDLE hProcess = GetCurrentProcess();
         auto RegisterPageAsCfgValid = [&](void* addr) {
@@ -230,9 +252,9 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
             typedef BOOL (WINAPI *pSetProcessValidCallTargets)(HANDLE, PVOID, SIZE_T, ULONG, PCFG_CALL_TARGET_INFO);
             static pSetProcessValidCallTargets fnSetProcessValidCallTargets =
                 (pSetProcessValidCallTargets)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessValidCallTargets");
-            if (!fnSetProcessValidCallTargets) return; // CFG not supported on this OS
+            if (!fnSetProcessValidCallTargets) return;
 
-            ULONG_PTR base = (ULONG_PTR)addr & ~(ULONG_PTR)(0xFFF); // page-align
+            ULONG_PTR base = (ULONG_PTR)addr & ~(ULONG_PTR)(0xFFF);
             const ULONG_PTR pageSize = 0x1000;
             const ULONG nSlots = (ULONG)(pageSize / 16);
             CFG_CALL_TARGET_INFO* entries = new CFG_CALL_TARGET_INFO[nSlots];
@@ -242,39 +264,40 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
             }
             BOOL ok = fnSetProcessValidCallTargets(hProcess, (PVOID)base, pageSize, nSlots, entries);
             delete[] entries;
-            if (!ok) {
-                LogToPipe("InitThread: SetProcessValidCallTargets failed err=" + std::to_string(GetLastError()));
-            } else {
-                LogToPipe("InitThread: CFG page registered base=" + std::to_string(base));
-            }
+            DWORD err = GetLastError();
+            LogToFile("InitThread: CFG register addr=" + std::to_string((uintptr_t)addr)
+                + " base=" + std::to_string(base) + " ok=" + std::to_string(ok)
+                + " err=" + std::to_string(err));
+            if (!ok) LogToPipe("InitThread: SetProcessValidCallTargets failed err=" + std::to_string(err));
+            else     LogToPipe("InitThread: CFG page registered base=" + std::to_string(base));
         };
 
-        // Register trampoline pages — Original_* already point into MinHook's trampoline
-        // after MH_CreateHook, even before Enable.
         RegisterPageAsCfgValid((void*)Original_ShutdownWindowsWorkerThread);
         RegisterPageAsCfgValid((void*)Original_WlDisplayStatusByResourceId);
-        // Register our own detour pages (in DLL image, but register defensively)
         RegisterPageAsCfgValid((void*)&Hooked_ShutdownWindowsWorkerThread);
         RegisterPageAsCfgValid((void*)&Hooked_WlDisplayStatusByResourceId);
     }
+    LogToFile("InitThread: CFG registration done. Calling MH_EnableHook...");
     LogToPipe("InitThread: CFG registration complete.");
 
-    // Enable hooks AFTER CFG registration so trampolines are valid before any call.
-    MH_EnableHook(MH_ALL_HOOKS);
-    LogToPipe("InitThread: All hooks enabled. DLL init complete.");
+    MH_STATUS enSt = MH_EnableHook(MH_ALL_HOOKS);
+    LogToFile("InitThread: MH_EnableHook returned " + std::to_string((int)enSt));
+    LogToPipe("InitThread: All hooks enabled (status=" + std::to_string((int)enSt) + "). DLL init complete.");
+
+    LogToFile("InitThread: Entering heartbeat loop.");
 
     // 4. Heartbeat loop
     while (true) {
         DWORD bytesWritten;
-        // Include null terminator to match the null-terminated protocol used by the Python service
         const char* beat = "PING\0";
         if (!WriteFile(g_hPipe, beat, strlen(beat) + 1, &bytesWritten, NULL)) {
-            // Broken pipe -> exit thread, DLL unloads or gets reinjected
+            LogToFile("InitThread: Heartbeat WriteFile failed, pipe broken.");
             break;
         }
         Sleep(5000);
     }
 
+    LogToFile("InitThread: Exiting. Cleaning up hooks.");
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
     CloseHandle(g_hPipe);
