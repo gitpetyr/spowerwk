@@ -308,11 +308,16 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        LogToFile("DllMain: DLL_PROCESS_ATTACH. hModule=" + std::to_string((uintptr_t)hModule));
         DisableThreadLibraryCalls(hModule);
         HANDLE hThread = CreateThread(NULL, 0, InitThread, hModule, 0, NULL);
         if (hThread) {
+            LogToFile("DllMain: CreateThread succeeded. hThread=" + std::to_string((uintptr_t)hThread));
             CloseHandle(hThread);
+        } else {
+            LogToFile("DllMain: CreateThread FAILED. err=" + std::to_string(GetLastError()));
         }
+        LogToFile("DllMain: Returning TRUE.");
     }
     return TRUE;
 }

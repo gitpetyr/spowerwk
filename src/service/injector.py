@@ -35,6 +35,9 @@ kernel32.CreateRemoteThread.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes
 kernel32.WaitForSingleObject.restype = ctypes.wintypes.DWORD
 kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.wintypes.DWORD]
 
+kernel32.GetExitCodeThread.restype = ctypes.wintypes.BOOL
+kernel32.GetExitCodeThread.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.DWORD)]
+
 kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
 kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
 
@@ -121,8 +124,20 @@ def inject_dll(pid, dll_path):
     wait_result = kernel32.WaitForSingleObject(h_thread, 5000)
     if wait_result != 0:  # WAIT_OBJECT_0 == 0
         logging.warning(f"inject_dll: WaitForSingleObject returned {wait_result:#x} (timeout or error)")
-    kernel32.CloseHandle(h_thread)
 
+    # LoadLibraryW returns the HMODULE as the thread exit code; 0 means it failed.
+    exit_code = ctypes.wintypes.DWORD(0)
+    kernel32.GetExitCodeThread(h_thread, ctypes.byref(exit_code))
+    if exit_code.value == 0:
+        logging.error("inject_dll: LoadLibraryW returned NULL in remote process — DLL failed to load (bad path, blocked by policy, missing dependency, etc.)")
+        kernel32.CloseHandle(h_thread)
+        kernel32.VirtualFreeEx(h_process, arg_address, 0, MEM_RELEASE)
+        kernel32.CloseHandle(h_process)
+        return False
+    else:
+        logging.info(f"inject_dll: LoadLibraryW returned HMODULE={exit_code.value:#x} — DLL loaded OK.")
+
+    kernel32.CloseHandle(h_thread)
     kernel32.VirtualFreeEx(h_process, arg_address, 0, MEM_RELEASE)
     kernel32.CloseHandle(h_process)
     return True
