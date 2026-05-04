@@ -230,6 +230,18 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
         // CFG requires offsets to be 16-byte aligned.
         auto RegisterPageAsCfgValid = [&](void* addr) {
             if (!addr) return;
+            
+            // Dynamically load SetProcessValidCallTargets to avoid linker errors
+            // and support older OS versions (like Win7) that don't have CFG.
+            typedef BOOL (WINAPI *pSetProcessValidCallTargets)(HANDLE, PVOID, SIZE_T, ULONG, PCFG_CALL_TARGET_INFO);
+            static pSetProcessValidCallTargets fnSetProcessValidCallTargets = 
+                (pSetProcessValidCallTargets)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessValidCallTargets");
+                
+            if (!fnSetProcessValidCallTargets) {
+                // CFG not supported on this OS, ignore.
+                return;
+            }
+
             ULONG_PTR base = (ULONG_PTR)addr & ~(ULONG_PTR)(0xFFF); // page-align
             const ULONG_PTR pageSize = 0x1000;
             // Build one entry per 16-byte slot on the page
@@ -239,7 +251,7 @@ DWORD WINAPI InitThread(LPVOID lpParam) {
                 entries[i].Offset = i * 16;
                 entries[i].Flags  = CFG_CALL_TARGET_VALID;
             }
-            BOOL ok = SetProcessValidCallTargets(hProcess, (PVOID)base, pageSize, nSlots, entries);
+            BOOL ok = fnSetProcessValidCallTargets(hProcess, (PVOID)base, pageSize, nSlots, entries);
             delete[] entries;
             if (!ok) {
                 DWORD err = GetLastError();
