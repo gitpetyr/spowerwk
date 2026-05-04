@@ -29,3 +29,10 @@ target_link_libraries(spowerwkHook PRIVATE Wtsapi32.lib Ntdll.lib)
 # winlogon.exe's DLL search path, causing LoadLibraryW to return NULL.
 set_property(TARGET spowerwkHook PROPERTY
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# Suppress LNK4098: MinHook lib was compiled with /MD, we use /MT.
+# /NODEFAULTLIB:MSVCRT removes the conflicting dynamic CRT reference.
+target_link_options(spowerwkHook PRIVATE /NODEFAULTLIB:MSVCRT)
+
+# Suppress C4267: size_t -> DWORD narrowing (intentional, values are small)
+target_compile_options(spowerwkHook PRIVATE /wd4267)
