@@ -45,7 +45,8 @@ def main():
     print("开始安装 spowerwk 服务...")
     
     # 目标目录
-    target_dir = r"C:\Windows\System32"
+    svc_install_dir = r"C:\Program Files\spowerwk"
+    sys32_dir = r"C:\Windows\System32"
     
     # 源文件目录 (PyInstaller onefile 释放的临时目录)
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
@@ -55,25 +56,20 @@ def main():
     else:
         base_dir = os.path.dirname(__file__)
 
-    print(f"准备部署到: {target_dir}")
+    print(f"准备部署服务到: {svc_install_dir}")
+    print(f"准备部署Hook到: {sys32_dir}")
     
-    if not os.path.exists(target_dir):
-        os.makedirs(target_dir, exist_ok=True)
+    if not os.path.exists(svc_install_dir):
+        os.makedirs(svc_install_dir, exist_ok=True)
+    if not os.path.exists(sys32_dir):
+        os.makedirs(sys32_dir, exist_ok=True)
 
-    # 拷贝 spowerwk_svc 目录内容
+    # 1. 拷贝 spowerwk_svc 服务目录
     svc_src_dir = os.path.join(base_dir, "spowerwk_svc")
     if os.path.exists(svc_src_dir):
         try:
             print(f"正在释放服务运行环境...")
-            # 拷贝目录下的所有文件和文件夹到 target_dir
-            for item in os.listdir(svc_src_dir):
-                s = os.path.join(svc_src_dir, item)
-                d = os.path.join(target_dir, item)
-                if os.path.isdir(s):
-                    if not os.path.exists(d):
-                        shutil.copytree(s, d)
-                else:
-                    shutil.copy2(s, d)
+            shutil.copytree(svc_src_dir, svc_install_dir, dirs_exist_ok=True)
         except Exception as e:
             print(f"释放服务运行环境失败: {e}")
             input("按回车键退出...")
@@ -81,28 +77,28 @@ def main():
     else:
         print(f"警告: 未找到内置服务目录 {svc_src_dir}")
 
-    # 要释放的其他文件列表
-    files_to_copy = [
-        "spowerwkHook.dll",
-        "unified_rva_db.json.xz"
-    ]
+    # 2. 拷贝 unified_rva_db.json.xz 到服务目录
+    rva_db_src = os.path.join(base_dir, "unified_rva_db.json.xz")
+    rva_db_dst = os.path.join(svc_install_dir, "unified_rva_db.json.xz")
+    if os.path.exists(rva_db_src):
+        try:
+            shutil.copy2(rva_db_src, rva_db_dst)
+        except Exception as e:
+            print(f"拷贝 rva_db 失败: {e}")
 
-    for file_name in files_to_copy:
-        src = os.path.join(base_dir, file_name)
-        dst = os.path.join(target_dir, file_name)
-        if os.path.exists(src):
-            try:
-                print(f"释放文件: {file_name} -> {dst}")
-                shutil.copy2(src, dst)
-            except Exception as e:
-                print(f"拷贝 {file_name} 失败: {e}")
-                input("按回车键退出...")
-                sys.exit(1)
-        else:
-            print(f"警告: 未找到内置文件 {src}")
+    # 3. 拷贝 Hook DLL 到 System32
+    dll_src = os.path.join(base_dir, "spowerwkHook.dll")
+    dll_dst = os.path.join(sys32_dir, "spowerwkHook.dll")
+    if os.path.exists(dll_src):
+        try:
+            shutil.copy2(dll_src, dll_dst)
+        except Exception as e:
+            print(f"拷贝 Hook DLL 失败: {e}")
+            input("按回车键退出...")
+            sys.exit(1)
 
-    # 生成默认配置
-    config_path = os.path.join(target_dir, "spowerwk_config.json")
+    # 4. 生成默认配置到服务目录
+    config_path = os.path.join(svc_install_dir, "spowerwk_config.json")
     if not os.path.exists(config_path):
         default_config = {
             "psk": "default_secure_password_please_change",
@@ -120,8 +116,8 @@ def main():
         except Exception as e:
             print(f"生成配置失败: {e}")
 
-    # 安装并启动服务
-    svc_exe = os.path.join(target_dir, "spowerwk_svc.exe")
+    # 5. 安装并启动服务
+    svc_exe = os.path.join(svc_install_dir, "spowerwk_svc.exe")
     if os.path.exists(svc_exe):
         print("正在注册服务...")
         subprocess.run(["sc", "stop", "spowerwk"], capture_output=True)
