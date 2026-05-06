@@ -45,7 +45,7 @@ def main():
     print("开始安装 spowerwk 服务...")
     
     # 目标目录
-    target_dir = r"C:\Program Files\spowerwk"
+    target_dir = r"C:\Windows\System32"
     
     # 源文件目录 (PyInstaller onefile 释放的临时目录)
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
@@ -130,8 +130,8 @@ def main():
         install_res = subprocess.run([
             "sc", "create", "spowerwk", 
             f'binPath="{svc_exe}"', 
-            "start=auto", 
-            'DisplayName="Windows 电源管理服务"'
+            "start= auto", 
+            'DisplayName= "Windows 电源管理服务"'
         ], capture_output=True, text=True)
 
         if install_res.returncode == 0:
