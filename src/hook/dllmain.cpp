@@ -189,32 +189,48 @@ bool AskPythonServiceToBlockShutdown() {
     return false;
 }
 
-// Turn off the display from within winlogon's interactive session (Session 1).
-// Calling this from the DLL is correct — service (Session 0) cannot reach
-// Session 1 windows via HWND_BROADCAST due to session isolation.
 void TurnOffDisplay() {
-    LogToPipe("TurnOffDisplay: Sending SC_MONITORPOWER=2 to HWND_BROADCAST.");
+    LogToPipe("TurnOffDisplay: Switching to Winsta0\\Winlogon to send SC_MONITORPOWER=2.");
 
     // Prevent OS from automatically waking the display back up
     SetThreadExecutionState(ES_CONTINUOUS);
 
-    // WM_SYSCOMMAND / SC_MONITORPOWER / lParam=2 => power off
-    // Use SendMessageTimeout so we don't block forever if a window is unresponsive
-    DWORD_PTR result = 0;
-    SendMessageTimeoutW(
-        HWND_BROADCAST,
-        WM_SYSCOMMAND,
-        SC_MONITORPOWER,
-        2,               // 2 = power off, 1 = low power, -1 = on
-        SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG,
-        2000,
-        &result);
+    // Save the original desktop of this thread
+    HDESK hOriginalDesktop = GetThreadDesktop(GetCurrentThreadId());
 
-    // Also try the desktop window directly in case broadcast is filtered
-    HWND hDesk = GetDesktopWindow();
-    if (hDesk) {
-        SendMessageTimeoutW(hDesk, WM_SYSCOMMAND, SC_MONITORPOWER, 2,
-            SMTO_ABORTIFHUNG, 1000, &result);
+    // winlogon.exe is already associated with WinSta0, so we can directly open the "Winlogon" desktop
+    HDESK hWinlogonDesk = OpenDesktopW(L"Winlogon", 0, FALSE, MAXIMUM_ALLOWED);
+    
+    if (hWinlogonDesk) {
+        if (SetThreadDesktop(hWinlogonDesk)) {
+            LogToPipe("TurnOffDisplay: Switched to Winlogon desktop. Broadcasting message...");
+            
+            DWORD_PTR result = 0;
+            // Send to HWND_BROADCAST on Winlogon desktop
+            SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SYSCOMMAND,
+                SC_MONITORPOWER,
+                2,               // 2 = power off, 1 = low power, -1 = on
+                SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG,
+                2000,
+                &result);
+
+            // Also try the desktop window directly in case broadcast is filtered
+            HWND hDesk = GetDesktopWindow();
+            if (hDesk) {
+                SendMessageTimeoutW(hDesk, WM_SYSCOMMAND, SC_MONITORPOWER, 2,
+                    SMTO_ABORTIFHUNG, 1000, &result);
+            }
+
+            // Restore the original desktop
+            SetThreadDesktop(hOriginalDesktop);
+        } else {
+            LogToPipe("TurnOffDisplay: SetThreadDesktop failed. Error: " + std::to_string(GetLastError()));
+        }
+        CloseDesktop(hWinlogonDesk);
+    } else {
+        LogToPipe("TurnOffDisplay: OpenDesktopW(Winlogon) failed. Error: " + std::to_string(GetLastError()));
     }
 
     LogToPipe("TurnOffDisplay: Done.");
