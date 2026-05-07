@@ -324,7 +324,7 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             time.sleep(1)
 
     def injector_loop(self):
-        dll_path = r"C:\Program Files\spowerwk\spowerwkHook.dll"
+        dll_path = r"C:\Windows\System32\spowerwkHook.dll"
         logging.info(f"injector_loop: Using DLL at: {dll_path}")
 
         while self.running:

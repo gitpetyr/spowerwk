@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ "main" ]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ── 并行 Job 1：下载 PDB 并生成 RVA 数据库 ────────────────────────────────
   build-rva-db:
@@ -14,10 +17,10 @@ jobs:
       PYTHONUTF8: 1
       PYTHONIOENCODING: utf8
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.11'
         cache: 'pip'
@@ -40,7 +43,7 @@ jobs:
         python -c "import lzma; print('Compressing unified_rva_db.json...'); open('unified_rva_db.json.xz', 'wb').write(lzma.compress(open('unified_rva_db.json', 'rb').read())); print('Compression done.')"
 
     - name: Upload RVA Database
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: rva-database
         path: unified_rva_db.json.xz
@@ -49,18 +52,22 @@ jobs:
   build-dll:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
+
+    - name: Setup MSVC
+      uses: TheMrMilchmann/setup-msvc-dev@v4
+      with:
+        arch: x64
 
     - name: Build C++ Hook DLL
       shell: cmd
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cl /LD /EHsc /O2 /MT /FespowerwkHook.dll src\hook\dllmain.cpp /I include /link lib\libMinHook.x64.lib Advapi32.lib Wtsapi32.lib Ntdll.lib User32.lib /NODEFAULTLIB:MSVCRT
         mkdir build\Release
         move spowerwkHook.dll build\Release\spowerwkHook.dll
 
     - name: Upload Hook DLL
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: hook-dll
         path: build/Release/spowerwkHook.dll
@@ -72,10 +79,10 @@ jobs:
       PYTHONUTF8: 1
       PYTHONIOENCODING: utf8
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.11'
         cache: 'pip'
@@ -87,10 +94,10 @@ jobs:
 
     - name: Build Python Service with PyInstaller (spowerwk_svc)
       run: |
-        pyinstaller --noconsole --onedir --name spowerwk_svc --hidden-import win32timezone src/service/main.py
+        pyinstaller --noconsole  --icon=NONE --onedir --name spowerwk_svc --hidden-import win32timezone src/service/main.py
 
     - name: Upload Service
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: spowerwk-svc
         path: dist/spowerwk_svc/
@@ -103,10 +110,10 @@ jobs:
       PYTHONUTF8: 1
       PYTHONIOENCODING: utf8
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.11'
         cache: 'pip'
@@ -117,18 +124,18 @@ jobs:
         pip install pyinstaller
 
     - name: Download RVA Database
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: rva-database
 
     - name: Download Hook DLL
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: hook-dll
         path: build/Release/
 
     - name: Download Service
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: spowerwk-svc
         path: dist/spowerwk_svc/
@@ -138,7 +145,7 @@ jobs:
         pyinstaller --onefile --name spowerwk --add-data "dist/spowerwk_svc;spowerwk_svc" --add-data "unified_rva_db.json.xz;." --add-data "build/Release/spowerwkHook.dll;." src/installer/install.py
 
     - name: Upload Installer
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: spowerwk-installer
         path: dist/spowerwk.exe

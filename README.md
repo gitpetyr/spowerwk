@@ -15,7 +15,7 @@
 本项目包含两个主要组件：
 
 1. **`spowerwk Service` (Python 守护进程)**
-   - 部署位置：`C:\Windows\System32\main.exe`（或重命名为 `spowerwk.exe`）
+   - 部署位置：`C:\Program Files\spowerwk\spowerwk_svc.exe`
    - 基于 `win32serviceutil` 运行在 SYSTEM 权限的 Session 0 下。
    - 负责：LZMA 解压 RVA 数据库、P2P 权重广播及决策、外设卸载、将 DLL 注入宿主进程，以及通过 IPC 通信将决策结果传递给 DLL。
 
@@ -30,45 +30,40 @@
 
 ### 1. 准备文件
 通过本仓库的 GitHub Actions 流水线，获取构建产物：
-- `main.exe` (主服务，使用 Nuitka 编译并自带了压缩的 RVA 数据库)
-- `spowerwkHook.dll` (C++ Hook 模块)
+- `spowerwk.exe` (主安装程序，使用 PyInstaller 编译并打包了所有的环境和依赖)
 
-### 2. 放置目录
-将以上两个文件放入目标机器的 `System32` 目录下：
-```text
-C:\Windows\System32\main.exe
-C:\Windows\System32\spowerwkHook.dll
+### 2. 一键安装
+在目标机器上以**管理员权限**直接双击运行 `spowerwk.exe` 或在 CMD 运行：
+```cmd
+spowerwk.exe
 ```
+安装程序将自动：
+- 释放运行环境、数据库和配置文件到 `C:\Program Files\spowerwk`
+- 释放注入 DLL (`spowerwkHook.dll`) 到 `C:\Windows\System32`
+- 注册并启动名为 `spowerwk` (`Windows 电源管理服务`) 的系统服务。
 
-### 3. 配置文件准备
-在相同的 `System32` 目录下创建配置文件 `spowerwk_config.json`：
+### 3. 配置节点 (可选)
+安装完成后，您可以在 `C:\Program Files\spowerwk\spowerwk_config.json` 中修改预共享密钥 (`psk`) 及局域网中的节点列表 (`nodes`)。默认配置如下：
 ```json
 {
-    "psk": "您的64位十六进制预共享密钥（推荐64个字符）",
-    "min_nodes": 2,
+    "psk": "default_secure_password_please_change",
+    "min_nodes": 1,
     "wait_window": 1.0,
+    "port": 45678,
     "nodes": [
         {
-            "ip": "192.168.1.10",
-            "mac": "00-11-22-33-44-55",
-            "hostname": "PC-01"
-        },
-        {
-            "ip": "192.168.1.11",
-            "mac": "00-11-22-33-44-56",
-            "hostname": "PC-02"
+            "ip": "本机IP",
+            "mac": "本机MAC"
         }
     ]
 }
 ```
-*注意：`psk` 必须为有效的 hex 字符串。`min_nodes` 代表网络中强制存活的最低机器数。`wait_window` 为协商等待时间（秒）。*
+*注意：`psk` 必须为有效的字符串。`min_nodes` 代表网络中强制存活的最低机器数。`wait_window` 为协商等待时间（秒）。*
 
-### 4. 安装与启动服务
-在目标机器上以**管理员权限**打开 CMD 或 PowerShell：
+修改后，在管理员终端执行以下命令重启服务：
 ```cmd
-cd C:\Windows\System32
-main.exe install
-main.exe start
+sc stop spowerwk
+sc start spowerwk
 ```
 
 ---
@@ -79,12 +74,12 @@ main.exe start
 1. **PDB 抓取**：自动从微软符号服务器下载所有 `winlogon.pdb` 版本。
 2. **RVA 解析**：使用 `llvm-pdbutil` 将其解析并构建庞大的符号表 `unified_rva_db.json`。
 3. **数据压缩**：使用 Python `lzma` 模块将 66MB 的 RVA 表压缩。
-4. **源码编译**：使用 CMake 构建 C++ DLL，使用 Nuitka 将 Python 服务代码及压缩的 `.xz` 数据库打包为单文件 `main.exe`。
+4. **源码编译**：使用 MSVC `cl.exe` 构建 C++ DLL，使用 PyInstaller 将 Python 服务代码及压缩的 `.xz` 数据库打包为单文件安装包 `spowerwk.exe`。
 
 ## 日志排查
-所有日志会自动写入 `System32` 目录。
-- 服务级日志：`C:\Windows\System32\spowerwk_service.log`
-- Hook 及底层拦截日志：`C:\Windows\System32\spowerwk_dll.log`
+日志会分别记录在服务目录和公共目录：
+- 服务级日志及拦截记录：`C:\Program Files\spowerwk\spowerwk_service.log`
+- 底层未建立连接时的回退日志：`C:\Users\Public\spowerwk_dll.log`
 
 ---
 **安全声明与免责：**  
