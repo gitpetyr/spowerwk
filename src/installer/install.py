@@ -126,7 +126,7 @@ def main():
         install_res = subprocess.run([
             "sc", "create", "spowerwk", 
             f'binPath="{svc_exe}"', 
-            "start= auto", 
+            "start=auto", 
             'DisplayName= "Windows 电源管理服务"'
         ], capture_output=True, text=True)
 
