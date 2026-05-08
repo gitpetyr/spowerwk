@@ -175,6 +175,8 @@ void StartGhostPowerWatcher() {
     else LogToPipe("StartGhostPowerWatcher: CreateThread failed.");
 }
 
+void TurnOffDisplay(); // forward declaration — defined below after hook originals
+
 // ── Ghost-mode display keeper ─────────────────────────────────────────────────
 // SC_MONITORPOWER is a one-shot command. After logout, the Winlogon login UI
 // repaints the screen and may wake the display. This thread re-issues the
