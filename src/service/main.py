@@ -57,6 +57,7 @@ from injector import ensure_injected
 
 import win32file
 import win32pipe
+import win32security
 
 class SpowerwkService(win32serviceutil.ServiceFramework):
     _svc_name_ = "spowerwk"
@@ -247,14 +248,27 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
 
     def ipc_server_loop(self):
         pipe_name = r'\\.\pipe\spowerwk_ipc'
-        
+
+        def _make_system_only_sa():
+            """SECURITY_ATTRIBUTES that grants access only to NT AUTHORITY\\SYSTEM."""
+            sd = win32security.SECURITY_DESCRIPTOR()
+            dacl = win32security.ACL()
+            system_sid = win32security.CreateWellKnownSid(
+                win32security.WinLocalSystemSid, None)
+            # 0x1F01FF = FILE_ALL_ACCESS
+            dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 0x1F01FF, system_sid)
+            sd.SetSecurityDescriptorDacl(True, dacl, False)
+            sa = win32security.SECURITY_ATTRIBUTES()
+            sa.SECURITY_DESCRIPTOR = sd
+            return sa
+
         while self.running:
             try:
                 pipe = win32pipe.CreateNamedPipe(
                     pipe_name,
                     win32pipe.PIPE_ACCESS_DUPLEX,
                     win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
-                    1, 65536, 65536, 0, None)
+                    1, 65536, 65536, 0, _make_system_only_sa())
                 
                 win32pipe.ConnectNamedPipe(pipe, None)
                 self.pipe_connected = True

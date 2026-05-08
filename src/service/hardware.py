@@ -90,19 +90,22 @@ def disable_devices_by_class(class_name):
     Available on Windows 10 and above.
     """
     try:
-        # Get list of devices
-        output = subprocess.check_output(["pnputil", "/enum-devices", "/class", class_name], text=True)
+        output = subprocess.check_output(
+            ["pnputil", "/enum-devices", "/class", class_name], text=True)
         instance_ids = []
         for line in output.splitlines():
             if "Instance ID:" in line or "实例 ID:" in line:
                 parts = line.split(":", 1)
                 if len(parts) > 1:
                     instance_ids.append(parts[1].strip())
-        
+
         for iid in instance_ids:
-            subprocess.run(["pnputil", "/disable-device", iid], capture_output=True)
+            try:
+                subprocess.run(["pnputil", "/disable-device", iid], capture_output=True)
+            except Exception as e:
+                logging.warning(f"disable_devices_by_class({class_name}): failed to disable {iid!r}: {e}")
     except Exception as e:
-        pass
+        logging.error(f"disable_devices_by_class({class_name}): device enumeration failed: {e}")
 
 
 _ghost_watchdog_started = False
@@ -122,6 +125,7 @@ def _ghost_power_watchdog():
         18 = Resume (critical)
     We treat type 4 (suspend) and power-status changes as power-button signals.
     """
+    ghost_start = time.time()
     logging.info("[GhostWatchdog] Power watchdog thread started.")
     try:
         import wmi
@@ -145,35 +149,39 @@ def _ghost_power_watchdog():
     except ImportError:
         # wmi module not available; fall back to a basic shutdown.exe event log poll
         logging.warning("[GhostWatchdog] wmi module unavailable. Using shutdown event fallback.")
-        _ghost_event_log_watchdog()
+        _ghost_event_log_watchdog(ghost_start)
     except Exception as e:
         logging.error(f"[GhostWatchdog] WMI watcher error: {e}")
 
 
-def _ghost_event_log_watchdog():
+def _ghost_event_log_watchdog(ghost_start: float):
     """
-    Ultra-simple fallback: poll every 3 seconds for System EventID 41
-    (unexpected power loss) or EventID 1074 (shutdown initiated).
-    If either appears with a timestamp newer than our ghost mode start, reboot.
+    Fallback: poll every 3 seconds for System EventID 41 (unexpected power loss)
+    or EventID 1074 (shutdown initiated) with a timestamp AFTER ghost_start.
+    Filtering by time prevents pre-existing log entries from triggering a false reboot.
     """
-    import subprocess, re, datetime
-    start_time = time.time()
-    logging.info("[GhostWatchdog] Event log watchdog started.")
+    import datetime
+    dt = datetime.datetime.utcfromtimestamp(ghost_start)
+    ts = dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    query = (
+        f"*[System[(EventID=41 or EventID=1074)"
+        f" and TimeCreated[@SystemTime>='{ts}']]]"
+    )
+    logging.info(f"[GhostWatchdog] Event log watchdog started (filtering events after {ts}).")
     while True:
         time.sleep(3)
         try:
             result = subprocess.run(
                 ["wevtutil", "qe", "System",
-                 "/q:*[System[(EventID=41 or EventID=1074)]]",
-                 "/c:1", "/rd:true", "/f:text"],
+                 f"/q:{query}", "/c:1", "/rd:true", "/f:text"],
                 capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0 and result.stdout.strip():
-                logging.warning("[GhostWatchdog] Detected power/shutdown event in System log. Rebooting.")
+                logging.warning("[GhostWatchdog] Detected power/shutdown event after Ghost Mode start. Rebooting.")
                 hard_reboot()
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"[GhostWatchdog] wevtutil poll error: {e}")
 
 
 def start_ghost_power_watchdog():
