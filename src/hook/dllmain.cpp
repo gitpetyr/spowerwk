@@ -1,11 +1,8 @@
 #include <windows.h>
 #include <MinHook.h>
 #include <string>
-#include <thread>
 #include <winternl.h>
 #include <fstream>
-#include <mutex>
-#include <atomic>
 #include <powrprof.h>
 #pragma comment(lib, "powrprof.lib")
 
@@ -17,51 +14,56 @@ void LogToFile(const std::string& msg) {
 
 // ── Pipe globals ──────────────────────────────────────────────────────────────
 //
-// g_hPipe is written exclusively by InitThread and read by hook callbacks.
-// std::atomic<HANDLE> gives safe publication on x64 (pointer-sized load/store).
+// g_pipeLock is SRWLOCK_INIT ({0}) — a compile-time constant, zero initialised
+// by the linker.  No constructor runs; safe in injected-DLL contexts where
+// _DllMainCRTStartup may not execute.
 //
-// g_pipeMutex serialises ALL pipe I/O so LOG: messages and the QUERY_SHUTDOWN
-// request-response pair never interleave at the byte level on the same handle.
-// AskPythonServiceToBlockShutdown acquires the mutex for the full exchange and
-// does NOT call LogToPipe while holding it, to avoid recursive locking.
+// g_hPipe is ALWAYS accessed under g_pipeLock (exclusive).
+//
+// g_isGhostMode is a volatile LONG; InterlockedExchange / direct volatile read
+// give sequentially-consistent semantics on x86/x64 (all loads/stores are
+// naturally atomic for aligned 32-bit values).
 
-std::atomic<HANDLE> g_hPipe{ INVALID_HANDLE_VALUE };
-std::mutex          g_pipeMutex;
+static SRWLOCK       g_pipeLock    = SRWLOCK_INIT;
+static HANDLE        g_hPipe       = INVALID_HANDLE_VALUE;
+static volatile LONG g_isGhostMode = 0;
+
+// Thin RAII guard — constructed only from worker threads, never from static init.
+struct PipeLock {
+    PipeLock()  { AcquireSRWLockExclusive(&g_pipeLock); }
+    ~PipeLock() { ReleaseSRWLockExclusive(&g_pipeLock); }
+    PipeLock(const PipeLock&)            = delete;
+    PipeLock& operator=(const PipeLock&) = delete;
+};
 
 // PipeWrite / PipeRead ─────────────────────────────────────────────────────────
-// Callers MUST hold g_pipeMutex.
-// Synchronous (blocking) I/O: avoids overlapped-completion-event pitfalls that
-// can misreport success/failure when WriteFile/ReadFile complete synchronously
-// inside an injected DLL context (GetOverlappedResult may return ERROR_IO_INCOMPLETE
-// for already-completed synchronous operations, causing spurious reconnects and
-// rapid reconnect loops that destabilise winlogon).
-
+// Callers MUST hold g_pipeLock.
 static bool PipeWrite(const char* buf, DWORD len) {
-    HANDLE h = g_hPipe.load(std::memory_order_acquire);
-    if (h == INVALID_HANDLE_VALUE) return false;
+    if (g_hPipe == INVALID_HANDLE_VALUE) return false;
     DWORD written = 0;
-    return WriteFile(h, buf, len, &written, NULL) && written == len;
+    return WriteFile(g_hPipe, buf, len, &written, NULL) && written == len;
 }
 
 static bool PipeRead(char* buf, DWORD len, DWORD* pRead) {
-    HANDLE h = g_hPipe.load(std::memory_order_acquire);
-    if (h == INVALID_HANDLE_VALUE) return false;
+    if (g_hPipe == INVALID_HANDLE_VALUE) return false;
     DWORD read = 0;
-    BOOL ok = ReadFile(h, buf, len, &read, NULL);
+    BOOL ok = ReadFile(g_hPipe, buf, len, &read, NULL);
     if (ok && pRead) *pRead = read;
     return ok != FALSE;
 }
 
-// LogToPipe acquires g_pipeMutex independently; it must NOT be called by any
-// code that already holds g_pipeMutex (see AskPythonServiceToBlockShutdown).
+// LogToPipe — acquires g_pipeLock; must NOT be called by code that already
+// holds g_pipeLock (see AskPythonServiceToBlockShutdown).
 void LogToPipe(const std::string& msg) {
-    if (g_hPipe.load(std::memory_order_acquire) == INVALID_HANDLE_VALUE) {
-        LogToFile("[pre-pipe] " + msg);
-        return;
+    {
+        PipeLock lk;
+        if (g_hPipe != INVALID_HANDLE_VALUE) {
+            std::string packet = "LOG:" + msg + '\0';
+            PipeWrite(packet.c_str(), (DWORD)packet.size());
+            return;
+        }
     }
-    std::string packet = "LOG:" + msg + '\0';
-    std::lock_guard<std::mutex> lock(g_pipeMutex);
-    PipeWrite(packet.c_str(), (DWORD)packet.size());
+    LogToFile("[pre-pipe] " + msg);
 }
 
 // ── NtShutdownSystem ──────────────────────────────────────────────────────────
@@ -71,9 +73,6 @@ typedef enum _SHUTDOWN_ACTION {
     ShutdownPowerOff
 } SHUTDOWN_ACTION;
 extern "C" NTSYSAPI NTSTATUS NTAPI NtShutdownSystem(SHUTDOWN_ACTION Action);
-
-// ── Global state ──────────────────────────────────────────────────────────────
-std::atomic<bool> g_isGhostMode{ false };
 
 // ── Ghost-mode power-button watcher ──────────────────────────────────────────
 static HWND         g_hPowerWnd    = NULL;
@@ -99,7 +98,7 @@ LRESULT CALLBACK GhostPowerWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
     if (msg == WM_POWERBROADCAST) {
         if (wParam == PBT_APMPOWERSTATUSCHANGE || wParam == PBT_APMRESUMEAUTOMATIC ||
             wParam == PBT_APMSUSPEND) {
-            if (g_isGhostMode.load()) {
+            if (g_isGhostMode != 0) {
                 LogToPipe("GhostPowerWndProc: WM_POWERBROADCAST during Ghost Mode. Rebooting.");
                 DoHardReboot();
             }
@@ -107,7 +106,7 @@ LRESULT CALLBACK GhostPowerWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
         if (wParam == PBT_POWERSETTINGCHANGE) {
             POWERBROADCAST_SETTING* pbs = reinterpret_cast<POWERBROADCAST_SETTING*>(lParam);
             if (pbs && IsEqualGUID(pbs->PowerSetting, GUID_POWERBUTTON_ACTION_FLAGS)) {
-                if (g_isGhostMode.load()) {
+                if (g_isGhostMode != 0) {
                     LogToPipe("GhostPowerWndProc: GUID_POWERBUTTON_ACTION_FLAGS change during Ghost Mode. Rebooting.");
                     DoHardReboot();
                 }
@@ -169,7 +168,7 @@ static const DWORD DISPLAY_KEEPER_INTERVAL_MS       = 10000; // re-send period
 DWORD WINAPI GhostDisplayKeeperThread(LPVOID) {
     LogToPipe("GhostDisplayKeeperThread: Started. Initial delay before first re-send.");
     Sleep(DISPLAY_KEEPER_INITIAL_DELAY_MS);
-    while (g_isGhostMode.load()) {
+    while (g_isGhostMode != 0) {
         TurnOffDisplay();
         Sleep(DISPLAY_KEEPER_INTERVAL_MS);
     }
@@ -194,17 +193,16 @@ typedef __int64(__fastcall* tWlStateMachineSetSignal)(unsigned int a1, PVOID a2)
 tWlStateMachineSetSignal Original_WlStateMachineSetSignal = nullptr;
 
 // ── Shutdown policy query ─────────────────────────────────────────────────────
-// Holds g_pipeMutex for the full write→read round-trip so LOG: messages cannot
+// Holds g_pipeLock for the full write→read round-trip so LOG: messages cannot
 // interleave with the response bytes. Does NOT call LogToPipe while locked.
 bool AskPythonServiceToBlockShutdown() {
-    if (g_hPipe.load(std::memory_order_acquire) == INVALID_HANDLE_VALUE) return false;
-
     bool success = false;
     bool block   = false;
     char resp[16] = {};
 
     {
-        std::lock_guard<std::mutex> lock(g_pipeMutex);
+        PipeLock lk;
+        if (g_hPipe == INVALID_HANDLE_VALUE) return false;
         const char* req = "QUERY_SHUTDOWN\0";
         if (PipeWrite(req, (DWORD)(strlen(req) + 1))) {
             DWORD bytesRead = 0;
@@ -213,7 +211,7 @@ bool AskPythonServiceToBlockShutdown() {
         }
     }
 
-    // Log after releasing the mutex so LogToPipe can acquire it safely
+    // Log after releasing the lock so LogToPipe can acquire it safely
     if (!success) {
         LogToPipe("AskPythonServiceToBlockShutdown: pipe timeout/error, fail-open.");
         return false;
@@ -269,7 +267,7 @@ void TurnOffDisplay() {
 // ── Hooked functions ──────────────────────────────────────────────────────────
 __declspec(guard(nocf))
 void __fastcall Hooked_ShutdownWindowsWorkerThread(PTP_CALLBACK_INSTANCE Instance, PVOID Context) {
-    if (g_isGhostMode.load()) {
+    if (g_isGhostMode != 0) {
         LogToPipe("Hooked_ShutdownWindowsWorkerThread: Ghost mode active. Secondary call - hard reboot!");
         DoHardReboot();
         return;
@@ -277,7 +275,7 @@ void __fastcall Hooked_ShutdownWindowsWorkerThread(PTP_CALLBACK_INSTANCE Instanc
     LogToPipe("Hooked_ShutdownWindowsWorkerThread: Intercepted primary shutdown call. Querying Service...");
     if (AskPythonServiceToBlockShutdown()) {
         LogToPipe("Service replied BLOCK. Entering Ghost Mode and spoofing context.");
-        g_isGhostMode.store(true);
+        InterlockedExchange(&g_isGhostMode, 1);
         StartGhostPowerWatcher();
         StartGhostDisplayKeeper();
         TurnOffDisplay();
@@ -290,7 +288,7 @@ void __fastcall Hooked_ShutdownWindowsWorkerThread(PTP_CALLBACK_INSTANCE Instanc
 
 __declspec(guard(nocf))
 __int64 __fastcall Hooked_WlDisplayStatusByResourceId(unsigned int a1, unsigned int a2, unsigned int a3, PVOID a4) {
-    if (g_isGhostMode.load() && a1 == 1003) {
+    if (g_isGhostMode != 0 && a1 == 1003) {
         LogToPipe("Hooked_WlDisplayStatusByResourceId: Spoofing logout UI (1003) to shutdown UI (1204).");
         a1 = 1204;
     }
@@ -299,7 +297,7 @@ __int64 __fastcall Hooked_WlDisplayStatusByResourceId(unsigned int a1, unsigned 
 
 __declspec(guard(nocf))
 __int64 __fastcall Hooked_WlStateMachineSetSignal(unsigned int a1, PVOID a2) {
-    if (g_isGhostMode.load() && a1 == 3 && a2 == nullptr) {
+    if (g_isGhostMode != 0 && a1 == 3 && a2 == nullptr) {
         LogToPipe("Hooked_WlStateMachineSetSignal: Intercepted SAS (Ctrl+Alt+Del) signal in Ghost Mode. Blocking.");
         return 13;
     }
@@ -331,7 +329,8 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
                 GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
                 0, NULL);
             if (h != INVALID_HANDLE_VALUE) {
-                g_hPipe.store(h, std::memory_order_release);
+                PipeLock lk;
+                g_hPipe = h;
                 break;
             }
             Sleep(1000);
@@ -346,7 +345,7 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
             DWORD bytesRead = 0;
             bool readOk = false;
             {
-                std::lock_guard<std::mutex> lock(g_pipeMutex);
+                PipeLock lk;
                 readOk = PipeRead(buf, sizeof(buf) - 1, &bytesRead);
             }
             if (!readOk) {
@@ -472,7 +471,7 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
             char discard[128] = {};
             DWORD dr = 0;
             {
-                std::lock_guard<std::mutex> lock(g_pipeMutex);
+                PipeLock lk;
                 PipeRead(discard, sizeof(discard) - 1, &dr);
             }
             LogToPipe("InitThread: Reconnected. Hooks already active, discarding RVA message.");
@@ -483,7 +482,7 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
             LogToFile("InitThread: Entering heartbeat loop.");
             for (;;) {
                 Sleep(5000);
-                std::lock_guard<std::mutex> lock(g_pipeMutex);
+                PipeLock lk;
                 if (!PipeWrite("PING\0", 5)) {
                     LogToFile("InitThread: Heartbeat failed, pipe broken.");
                     break;
@@ -492,11 +491,13 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
         }
 
         // ── Cleanup before reconnect ───────────────────────────────────────────
+        HANDLE oldPipe;
         {
-            HANDLE h = g_hPipe.load(std::memory_order_acquire);
-            g_hPipe.store(INVALID_HANDLE_VALUE, std::memory_order_release);
-            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            PipeLock lk;
+            oldPipe = g_hPipe;
+            g_hPipe = INVALID_HANDLE_VALUE;
         }
+        if (oldPipe != INVALID_HANDLE_VALUE) CloseHandle(oldPipe);
         LogToFile("InitThread: Pipe closed. Will reconnect.");
         Sleep(1000);
 

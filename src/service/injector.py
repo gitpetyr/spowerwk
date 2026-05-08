@@ -166,7 +166,8 @@ def inject_dll(pid, dll_path):
     kernel32.VirtualFreeEx(h_process, arg_address, 0, MEM_RELEASE)
     kernel32.CloseHandle(h_process)
 
-    if exit_code.value == 0:
+    hmodule = exit_code.value
+    if hmodule == 0:
         logging.error(
             "inject_dll: LoadLibraryW returned NULL — DLL failed to load. "
             "Possible causes: missing dependency, AV/WDAC block, corrupt DLL, "
@@ -174,7 +175,20 @@ def inject_dll(pid, dll_path):
         )
         return False
 
-    logging.info(f"inject_dll: LoadLibraryW returned HMODULE={exit_code.value:#x} — DLL loaded OK.")
+    # Valid DLL base addresses are always page-aligned (lower 12 bits == 0).
+    # NTSTATUS error codes (e.g. 0xC0000005 = STATUS_ACCESS_VIOLATION) are never
+    # page-aligned, so a non-zero lower-12-bit value means the remote thread
+    # crashed rather than returning a real HMODULE.
+    if hmodule & 0xFFF != 0:
+        logging.error(
+            f"inject_dll: Remote thread exited with code {hmodule:#010x} which is "
+            f"not page-aligned — not a valid HMODULE. The DLL crashed during load "
+            f"(likely an NTSTATUS error such as STATUS_ACCESS_VIOLATION=0xC0000005). "
+            f"Check C:\\Users\\Public\\spowerwk_dll.log for details."
+        )
+        return False
+
+    logging.info(f"inject_dll: LoadLibraryW returned HMODULE={hmodule:#x} — DLL loaded OK.")
     return True
 
 
