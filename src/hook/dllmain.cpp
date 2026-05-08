@@ -175,6 +175,36 @@ void StartGhostPowerWatcher() {
     else LogToPipe("StartGhostPowerWatcher: CreateThread failed.");
 }
 
+// ── Ghost-mode display keeper ─────────────────────────────────────────────────
+// SC_MONITORPOWER is a one-shot command. After logout, the Winlogon login UI
+// repaints the screen and may wake the display. This thread re-issues the
+// power-off command every DISPLAY_KEEPER_INTERVAL_MS while Ghost Mode is active.
+//
+// Critical: this thread must NEVER create any USER objects (windows, menus…).
+// SetThreadDesktop (called inside TurnOffDisplay) fails if the calling thread
+// already owns windows. Keeping this thread window-free guarantees the desktop
+// switch works on every iteration.
+
+static const DWORD DISPLAY_KEEPER_INITIAL_DELAY_MS  = 2000;  // wait for logout transition
+static const DWORD DISPLAY_KEEPER_INTERVAL_MS       = 10000; // re-send period
+
+DWORD WINAPI GhostDisplayKeeperThread(LPVOID) {
+    LogToPipe("GhostDisplayKeeperThread: Started. Initial delay before first re-send.");
+    Sleep(DISPLAY_KEEPER_INITIAL_DELAY_MS);
+    while (g_isGhostMode.load()) {
+        TurnOffDisplay();
+        Sleep(DISPLAY_KEEPER_INTERVAL_MS);
+    }
+    LogToPipe("GhostDisplayKeeperThread: Ghost mode cleared, exiting.");
+    return 0;
+}
+
+void StartGhostDisplayKeeper() {
+    HANDLE hT = CreateThread(NULL, 0, GhostDisplayKeeperThread, NULL, 0, NULL);
+    if (hT) CloseHandle(hT);
+    else LogToPipe("StartGhostDisplayKeeper: CreateThread failed.");
+}
+
 // ── Hook originals ────────────────────────────────────────────────────────────
 typedef void(__fastcall* tShutdownWindowsWorkerThread)(PTP_CALLBACK_INSTANCE Instance, PVOID Context);
 tShutdownWindowsWorkerThread Original_ShutdownWindowsWorkerThread = nullptr;
@@ -271,6 +301,7 @@ void __fastcall Hooked_ShutdownWindowsWorkerThread(PTP_CALLBACK_INSTANCE Instanc
         LogToPipe("Service replied BLOCK. Entering Ghost Mode and spoofing context.");
         g_isGhostMode.store(true);
         StartGhostPowerWatcher();
+        StartGhostDisplayKeeper();
         TurnOffDisplay();
         Original_ShutdownWindowsWorkerThread(Instance, (PVOID)0);
     } else {
