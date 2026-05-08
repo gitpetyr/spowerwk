@@ -30,50 +30,26 @@ std::mutex          g_pipeMutex;
 
 // PipeWrite / PipeRead ─────────────────────────────────────────────────────────
 // Callers MUST hold g_pipeMutex.
-// FILE_FLAG_OVERLAPPED lets us enforce a real deadline so a stalled Python
-// service cannot block a thread-pool callback (Hooked_ShutdownWindowsWorkerThread)
-// indefinitely and wedge the entire winlogon thread pool.
+// Synchronous (blocking) I/O: avoids overlapped-completion-event pitfalls that
+// can misreport success/failure when WriteFile/ReadFile complete synchronously
+// inside an injected DLL context (GetOverlappedResult may return ERROR_IO_INCOMPLETE
+// for already-completed synchronous operations, causing spurious reconnects and
+// rapid reconnect loops that destabilise winlogon).
 
-static bool PipeWrite(const char* buf, DWORD len, DWORD timeoutMs = 5000) {
+static bool PipeWrite(const char* buf, DWORD len) {
     HANDLE h = g_hPipe.load(std::memory_order_acquire);
     if (h == INVALID_HANDLE_VALUE) return false;
-    HANDLE hEv = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (!hEv) return false;
-    OVERLAPPED ov = {};
-    ov.hEvent = hEv;
     DWORD written = 0;
-    bool ok = false;
-    if (WriteFile(h, buf, len, NULL, &ov)) {
-        ok = GetOverlappedResult(h, &ov, &written, FALSE) && written == len;
-    } else if (GetLastError() == ERROR_IO_PENDING) {
-        if (WaitForSingleObject(hEv, timeoutMs) == WAIT_OBJECT_0)
-            ok = GetOverlappedResult(h, &ov, &written, FALSE) && written == len;
-        else { CancelIo(h); GetOverlappedResult(h, &ov, &written, TRUE); }
-    }
-    CloseHandle(hEv);
-    return ok;
+    return WriteFile(h, buf, len, &written, NULL) && written == len;
 }
 
-static bool PipeRead(char* buf, DWORD len, DWORD* pRead, DWORD timeoutMs = 5000) {
+static bool PipeRead(char* buf, DWORD len, DWORD* pRead) {
     HANDLE h = g_hPipe.load(std::memory_order_acquire);
     if (h == INVALID_HANDLE_VALUE) return false;
-    HANDLE hEv = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (!hEv) return false;
-    OVERLAPPED ov = {};
-    ov.hEvent = hEv;
     DWORD read = 0;
-    bool ok = false;
-    if (ReadFile(h, buf, len, NULL, &ov)) {
-        ok = GetOverlappedResult(h, &ov, &read, FALSE);
-        if (ok && pRead) *pRead = read;
-    } else if (GetLastError() == ERROR_IO_PENDING) {
-        if (WaitForSingleObject(hEv, timeoutMs) == WAIT_OBJECT_0) {
-            ok = GetOverlappedResult(h, &ov, &read, FALSE);
-            if (ok && pRead) *pRead = read;
-        } else { CancelIo(h); GetOverlappedResult(h, &ov, &read, TRUE); }
-    }
-    CloseHandle(hEv);
-    return ok;
+    BOOL ok = ReadFile(h, buf, len, &read, NULL);
+    if (ok && pRead) *pRead = read;
+    return ok != FALSE;
 }
 
 // LogToPipe acquires g_pipeMutex independently; it must NOT be called by any
@@ -85,7 +61,7 @@ void LogToPipe(const std::string& msg) {
     }
     std::string packet = "LOG:" + msg + '\0';
     std::lock_guard<std::mutex> lock(g_pipeMutex);
-    PipeWrite(packet.c_str(), (DWORD)packet.size(), 2000);
+    PipeWrite(packet.c_str(), (DWORD)packet.size());
 }
 
 // ── NtShutdownSystem ──────────────────────────────────────────────────────────
@@ -230,9 +206,9 @@ bool AskPythonServiceToBlockShutdown() {
     {
         std::lock_guard<std::mutex> lock(g_pipeMutex);
         const char* req = "QUERY_SHUTDOWN\0";
-        if (PipeWrite(req, (DWORD)(strlen(req) + 1), 3000)) {
+        if (PipeWrite(req, (DWORD)(strlen(req) + 1))) {
             DWORD bytesRead = 0;
-            success = PipeRead(resp, sizeof(resp) - 1, &bytesRead, 6000);
+            success = PipeRead(resp, sizeof(resp) - 1, &bytesRead);
             if (success) block = (strcmp(resp, "BLOCK") == 0);
         }
     }
@@ -353,7 +329,7 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
         for (;;) {
             HANDLE h = CreateFileA("\\\\.\\pipe\\spowerwk_ipc",
                 GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED, NULL);
+                0, NULL);
             if (h != INVALID_HANDLE_VALUE) {
                 g_hPipe.store(h, std::memory_order_release);
                 break;
@@ -371,7 +347,7 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
             bool readOk = false;
             {
                 std::lock_guard<std::mutex> lock(g_pipeMutex);
-                readOk = PipeRead(buf, sizeof(buf) - 1, &bytesRead, 15000);
+                readOk = PipeRead(buf, sizeof(buf) - 1, &bytesRead);
             }
             if (!readOk) {
                 LogToFile("InitThread: PipeRead for RVA timed out or failed. err=" + std::to_string(GetLastError()));
@@ -497,7 +473,7 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
             DWORD dr = 0;
             {
                 std::lock_guard<std::mutex> lock(g_pipeMutex);
-                PipeRead(discard, sizeof(discard) - 1, &dr, 10000);
+                PipeRead(discard, sizeof(discard) - 1, &dr);
             }
             LogToPipe("InitThread: Reconnected. Hooks already active, discarding RVA message.");
         }
@@ -508,7 +484,7 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
             for (;;) {
                 Sleep(5000);
                 std::lock_guard<std::mutex> lock(g_pipeMutex);
-                if (!PipeWrite("PING\0", 5, 3000)) {
+                if (!PipeWrite("PING\0", 5)) {
                     LogToFile("InitThread: Heartbeat failed, pipe broken.");
                     break;
                 }

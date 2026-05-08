@@ -260,6 +260,7 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             sd.SetSecurityDescriptorDacl(True, dacl, False)
             sa = win32security.SECURITY_ATTRIBUTES()
             sa.SECURITY_DESCRIPTOR = sd
+            sa._dacl = dacl  # 防止 dacl 被 GC：sd 不持有 dacl 的 Python 引用
             return sa
 
         while self.running:
