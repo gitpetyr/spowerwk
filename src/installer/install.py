@@ -124,10 +124,12 @@ def main():
         subprocess.run(["sc", "delete", "spowerwk"], capture_output=True)
         
         install_res = subprocess.run([
-            "sc", "create", "spowerwk", 
-            f'binPath="{svc_exe}"', 
-            "start=auto", 
-            'DisplayName= "Windows 电源管理服务"'
+            "sc", "create", "spowerwk",
+            f"binPath= \"{svc_exe}\"",      # 空格在=后是sc的要求；引号保护含空格的路径
+            "start= auto",
+            "type= interact",               # 允许服务与桌面交互（第一个type参数）
+            "type= own",                    # 独立进程（第二个type参数，与interact组合生效）
+            "DisplayName= Windows 电源管理服务"  # 不加引号，避免sc将引号写入注册表
         ], capture_output=True, text=True)
 
         if install_res.returncode == 0:

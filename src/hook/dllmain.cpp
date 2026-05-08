@@ -195,43 +195,66 @@ void TurnOffDisplay() {
     // Prevent OS from automatically waking the display back up
     SetThreadExecutionState(ES_CONTINUOUS);
 
-    // Save the original desktop of this thread
-    HDESK hOriginalDesktop = GetThreadDesktop(GetCurrentThreadId());
+    // Save the originals so we can restore after
+    HWINSTA hOriginalWinsta = GetProcessWindowStation();
+    HDESK   hOriginalDesktop = GetThreadDesktop(GetCurrentThreadId());
 
-    // winlogon.exe is already associated with WinSta0, so we can directly open the "Winlogon" desktop
-    HDESK hWinlogonDesk = OpenDesktopW(L"Winlogon", 0, FALSE, MAXIMUM_ALLOWED);
-    
-    if (hWinlogonDesk) {
-        if (SetThreadDesktop(hWinlogonDesk)) {
-            LogToPipe("TurnOffDisplay: Switched to Winlogon desktop. Broadcasting message...");
-            
-            DWORD_PTR result = 0;
-            // Send to HWND_BROADCAST on Winlogon desktop
-            SendMessageTimeoutW(
-                HWND_BROADCAST,
-                WM_SYSCOMMAND,
-                SC_MONITORPOWER,
-                2,               // 2 = power off, 1 = low power, -1 = on
-                SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG,
-                2000,
-                &result);
-
-            // Also try the desktop window directly in case broadcast is filtered
-            HWND hDesk = GetDesktopWindow();
-            if (hDesk) {
-                SendMessageTimeoutW(hDesk, WM_SYSCOMMAND, SC_MONITORPOWER, 2,
-                    SMTO_ABORTIFHUNG, 1000, &result);
-            }
-
-            // Restore the original desktop
-            SetThreadDesktop(hOriginalDesktop);
-        } else {
-            LogToPipe("TurnOffDisplay: SetThreadDesktop failed. Error: " + std::to_string(GetLastError()));
-        }
-        CloseDesktop(hWinlogonDesk);
-    } else {
-        LogToPipe("TurnOffDisplay: OpenDesktopW(Winlogon) failed. Error: " + std::to_string(GetLastError()));
+    // Step 1: Open WinSta0 (the interactive window station)
+    HWINSTA hWinsta = OpenWindowStationW(L"winsta0", FALSE, MAXIMUM_ALLOWED);
+    if (!hWinsta) {
+        LogToPipe("TurnOffDisplay: OpenWindowStation(winsta0) failed. Error: " + std::to_string(GetLastError()));
+        return;
     }
+
+    // Step 2: Associate this process with WinSta0
+    if (!SetProcessWindowStation(hWinsta)) {
+        LogToPipe("TurnOffDisplay: SetProcessWindowStation(winsta0) failed. Error: " + std::to_string(GetLastError()));
+        CloseWindowStation(hWinsta);
+        return;
+    }
+
+    // Step 3: Open the Winlogon desktop within WinSta0
+    HDESK hDesk = OpenDesktopW(L"Winlogon", 0, FALSE, MAXIMUM_ALLOWED);
+    if (!hDesk) {
+        LogToPipe("TurnOffDisplay: OpenDesktopW(Winlogon) failed. Error: " + std::to_string(GetLastError()));
+        SetProcessWindowStation(hOriginalWinsta);
+        CloseWindowStation(hWinsta);
+        return;
+    }
+
+    // Step 4: Switch this thread to the Winlogon desktop
+    if (SetThreadDesktop(hDesk)) {
+        LogToPipe("TurnOffDisplay: Switched to Winlogon desktop. Broadcasting SC_MONITORPOWER=2...");
+
+        DWORD_PTR result = 0;
+        // Broadcast to all top-level windows on the Winlogon desktop
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SYSCOMMAND,
+            SC_MONITORPOWER,
+            2,               // 2 = power off, 1 = low power, -1 = on
+            SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG,
+            2000,
+            &result);
+
+        // Also target the desktop window directly in case broadcast is filtered
+        HWND hDesktopWnd = GetDesktopWindow();
+        if (hDesktopWnd) {
+            SendMessageTimeoutW(hDesktopWnd, WM_SYSCOMMAND, SC_MONITORPOWER, 2,
+                SMTO_ABORTIFHUNG, 1000, &result);
+        }
+
+        // Restore thread desktop before closing handles
+        SetThreadDesktop(hOriginalDesktop);
+    } else {
+        LogToPipe("TurnOffDisplay: SetThreadDesktop(Winlogon) failed. Error: " + std::to_string(GetLastError()));
+    }
+
+    CloseDesktop(hDesk);
+
+    // Restore process window station
+    SetProcessWindowStation(hOriginalWinsta);
+    CloseWindowStation(hWinsta);
 
     LogToPipe("TurnOffDisplay: Done.");
 }
