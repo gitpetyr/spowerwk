@@ -124,11 +124,16 @@ def main():
         subprocess.run(["sc", "stop", "spowerwk"], capture_output=True)
         subprocess.run(["sc", "delete", "spowerwk"], capture_output=True)
         
+        # sc.exe 要求 key= 和 value 是两个独立参数。
+        # 合并为 "key= value" 单字符串时 list2cmdline 加引号后 value 带前导空格，
+        # sc.exe 会报"无效域"错误。
+        # binPath 值需含引号以保护路径中的空格（list2cmdline 对含引号字符串会做
+        # 转义，CommandLineToArgvW 还原后 sc.exe 收到带引号的路径并写入注册表）。
         install_res = subprocess.run([
             "sc", "create", "spowerwk",
-            f"binPath= \"{svc_exe}\"",     # 空格在=后是sc的要求；引号保护含空格的路径
-            "start= auto",
-            "DisplayName= Windows 电源管理服务"  # 不加引号，避免sc将引号写入注册表
+            "binPath=", f'"{svc_exe}"',
+            "start=", "auto",
+            "DisplayName=", "Windows 电源管理服务"
         ], capture_output=True, text=True)
 
         if install_res.returncode == 0:
