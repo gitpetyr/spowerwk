@@ -15,7 +15,7 @@ import time
 log_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 logging.basicConfig(
     filename=os.path.join(log_dir, 'spowerwk_service.log'),
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
@@ -250,7 +250,9 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
         pipe_name = r'\\.\pipe\spowerwk_ipc'
 
         def _make_system_only_sa():
-            """SECURITY_ATTRIBUTES that grants access only to NT AUTHORITY\\SYSTEM."""
+            """SECURITY_ATTRIBUTES that grants access only to NT AUTHORITY\\SYSTEM.
+            Returns (sa, dacl) — caller must hold dacl to prevent GC, because
+            SetSecurityDescriptorDacl stores a raw pointer without a Python refcount."""
             sd = win32security.SECURITY_DESCRIPTOR()
             dacl = win32security.ACL()
             system_sid = win32security.CreateWellKnownSid(
@@ -260,16 +262,16 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             sd.SetSecurityDescriptorDacl(True, dacl, False)
             sa = win32security.SECURITY_ATTRIBUTES()
             sa.SECURITY_DESCRIPTOR = sd
-            sa._dacl = dacl  # 防止 dacl 被 GC：sd 不持有 dacl 的 Python 引用
-            return sa
+            return sa, dacl  # dacl must stay alive as long as sa is in use
 
         while self.running:
             try:
+                sa, _dacl = _make_system_only_sa()  # _dacl keeps DACL alive in this scope
                 pipe = win32pipe.CreateNamedPipe(
                     pipe_name,
                     win32pipe.PIPE_ACCESS_DUPLEX,
                     win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
-                    1, 65536, 65536, 0, _make_system_only_sa())
+                    1, 65536, 65536, 0, sa)
                 
                 win32pipe.ConnectNamedPipe(pipe, None)
                 self.pipe_connected = True
@@ -318,17 +320,17 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                                     except: pass
                                     enter_ghost_mode()
                                     start_ghost_power_watchdog()
-                                    
+
                             elif req == "PING":
                                 logging.info("Received PING from DLL")
                                 pass # Heartbeat
-                            
+
                     except Exception as e:
                         logging.error(f"IPC Pipe error or broken: {e}")
                         break # Pipe broken
-                        
-            except Exception:
-                pass
+
+            except Exception as e:
+                logging.error(f"ipc_server_loop: unhandled exception: {e}")
             finally:
                 self.pipe_connected = False
                 try:
