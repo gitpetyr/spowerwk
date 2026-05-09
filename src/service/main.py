@@ -12,7 +12,7 @@ import threading
 import logging
 import time
 
-log_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+log_dir = os.path.dirname(sys.executable) if (getattr(sys, 'frozen', False) or '__compiled__' in globals()) else os.path.dirname(os.path.abspath(__file__))
 logging.basicConfig(
     filename=os.path.join(log_dir, 'spowerwk_service.log'),
     level=logging.DEBUG,

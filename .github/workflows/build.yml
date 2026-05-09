@@ -87,14 +87,40 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
 
+    - name: Setup MSVC
+      uses: TheMrMilchmann/setup-msvc-dev@v4
+      with:
+        arch: x64
+
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt pyinstaller
+        pip install -r requirements.txt nuitka ordered-set zstandard
 
-    - name: Build Python Service with PyInstaller (spowerwk_svc)
+    - name: Build Python Service with Nuitka onefile (spowerwk_svc)
+      shell: pwsh
       run: |
-        pyinstaller --noconsole  --icon=NONE --onedir --name spowerwk_svc --hidden-import win32timezone src/service/main.py
+        $env:PYTHONPATH = "src\service"
+        python -m nuitka `
+          --onefile `
+          --windows-console-mode=disable `
+          --assume-yes-for-downloads `
+          --include-module=crypto `
+          --include-module=p2p `
+          --include-module=injector `
+          --include-module=win32service `
+          --include-module=win32serviceutil `
+          --include-module=win32event `
+          --include-module=servicemanager `
+          --include-module=win32file `
+          --include-module=win32pipe `
+          --include-module=win32security `
+          --include-module=win32timezone `
+          --include-module=pywintypes `
+          --output-filename=spowerwk_svc.exe `
+          src\service\main.py
+        New-Item -ItemType Directory -Force dist\spowerwk_svc | Out-Null
+        Move-Item spowerwk_svc.exe dist\spowerwk_svc\
 
     - name: Upload Service
       uses: actions/upload-artifact@v7
@@ -118,10 +144,15 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
 
-    - name: Install PyInstaller
+    - name: Setup MSVC
+      uses: TheMrMilchmann/setup-msvc-dev@v4
+      with:
+        arch: x64
+
+    - name: Install Nuitka
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
+        pip install nuitka ordered-set zstandard
 
     - name: Download RVA Database
       uses: actions/download-artifact@v8
@@ -140,9 +171,19 @@ jobs:
         name: spowerwk-svc
         path: dist/spowerwk_svc/
 
-    - name: Build Installer with PyInstaller (spowerwk.exe)
+    - name: Build Installer with Nuitka onefile (spowerwk.exe)
+      shell: pwsh
       run: |
-        pyinstaller --onefile --name spowerwk --add-data "dist/spowerwk_svc;spowerwk_svc" --add-data "unified_rva_db.json.xz;." --add-data "build/Release/spowerwkHook.dll;." src/installer/install.py
+        python -m nuitka `
+          --onefile `
+          --assume-yes-for-downloads `
+          "--include-data-dir=dist/spowerwk_svc=spowerwk_svc" `
+          "--include-data-files=unified_rva_db.json.xz=unified_rva_db.json.xz" `
+          "--include-data-files=build/Release/spowerwkHook.dll=spowerwkHook.dll" `
+          --output-filename=spowerwk.exe `
+          src\installer\install.py
+        New-Item -ItemType Directory -Force dist | Out-Null
+        Move-Item spowerwk.exe dist\
 
     - name: Upload Installer
       uses: actions/upload-artifact@v7
