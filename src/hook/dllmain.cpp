@@ -102,9 +102,14 @@ bool AskPythonServiceToBlockShutdown() {
 // ── Hooked functions ──────────────────────────────────────────────────────────
 __declspec(guard(nocf))
 void __fastcall Hooked_ShutdownWindowsWorkerThread(PTP_CALLBACK_INSTANCE Instance, PVOID Context) {
-    LogToPipe("Hooked_ShutdownWindowsWorkerThread: Intercepted shutdown call. Querying Service...");
+    DWORD flags = (DWORD)(uintptr_t)Context;
+    if (!(flags | EWX_SHUTDOWN)) {
+        Original_ShutdownWindowsWorkerThread(Instance, Context);
+        return;
+    }
+    LogToPipe("Hooked_ShutdownWindowsWorkerThread: Intercepted shutdown. Querying Service...");
     if (AskPythonServiceToBlockShutdown()) {
-        LogToPipe("Service replied BLOCK. Converting shutdown to reboot force.");
+        LogToPipe("Service replied BLOCK. Converting to reboot force.");
         Original_ShutdownWindowsWorkerThread(Instance, (PVOID)(EWX_REBOOT | EWX_FORCE));
     } else {
         LogToPipe("Service replied ALLOW. Permitting normal shutdown.");

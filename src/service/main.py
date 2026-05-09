@@ -52,7 +52,6 @@ def start_log_server(port, log_file_path):
 
 from crypto import SecureChannel
 from p2p import P2PManager
-from hardware import enter_ghost_mode, start_ghost_power_watchdog
 from injector import ensure_injected
 
 import win32file
@@ -325,12 +324,10 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
                                     try: win32file.FlushFileBuffers(pipe)
                                     except: pass
                                 else:
-                                    logging.info("Decision: BLOCK. Sending BLOCK to DLL and entering Ghost Mode.")
+                                    logging.info("Decision: BLOCK. Sending BLOCK to DLL.")
                                     win32file.WriteFile(pipe, b"BLOCK\x00")
                                     try: win32file.FlushFileBuffers(pipe)
                                     except: pass
-                                    enter_ghost_mode()
-                                    start_ghost_power_watchdog()
 
                             elif req == "PING":
                                 logging.info("Received PING from DLL")
