@@ -3,6 +3,7 @@ import threading
 import time
 import random
 import struct
+import math
 from crypto import SecureChannel
 
 class P2PManager:
@@ -12,6 +13,7 @@ class P2PManager:
         self.wait_window = config.get('wait_window', 1.0)
         self.crypto = crypto_channel
         self.broadcast_port = config.get('port', 45678)
+        self.config = config
         self.active_nodes = set()
         self.intents = {}
         self.lock = threading.Lock()
@@ -60,22 +62,48 @@ class P2PManager:
                 pass
 
     def _ping_loop(self):
+        interval = self.config.get('ping_min_interval', 1.0)
         while True:
-            # Broadcast PING
             ping_msg = self.crypto.encrypt_message({'type': 'PING'})
             try:
                 self.udp_sock.sendto(ping_msg, ('<broadcast>', self.broadcast_port))
             except Exception:
                 pass
-            
-            # Check active nodes against min_nodes
-            time.sleep(5)
+
+            time.sleep(interval)
+
             with self.lock:
                 current_active = len(self.active_nodes)
-                if current_active < self.min_nodes and current_active > 0:
-                    # Bug #4 note: _wake_offline_nodes MUST be called while holding self.lock
+                if current_active < self.min_nodes:
                     self._wake_offline_nodes()
-                self.active_nodes.clear() # reset for next cycle
+                self.active_nodes.clear()
+
+            interval = self._calc_ping_interval(current_active)
+
+    def _calc_ping_interval(self, active_count: int) -> float:
+        """
+        计算下一轮 ping 间隔（下凹函数，f''>0，初始增速慢后期增速快）。
+        mode='fixed' : 始终返回 ping_min_interval。
+        mode='power' : min + (max-min) * (n/N)^k，k>1 时为下凹，缺省 k=2（抛物线）。
+        mode='exp'   : min + (max-min) * (e^(n/N)-1)/(e-1)，下凹性更强。
+        N = ping_interval_nodes（预期最大节点数，归一化用）。
+        """
+        min_i = self.config.get('ping_min_interval', 1.0)
+        max_i = self.config.get('ping_max_interval', 5.0)
+        mode  = self.config.get('ping_interval_mode', 'power')
+        N     = max(1, self.config.get('ping_interval_nodes', 10))
+
+        if mode == 'fixed':
+            return min_i
+
+        n = max(0, min(active_count, N))
+        if mode == 'exp':
+            ratio = (math.exp(n / N) - 1) / (math.e - 1)
+        else:  # 'power' 为默认
+            k = self.config.get('ping_interval_exponent', 2.0)
+            ratio = (n / N) ** k
+
+        return min_i + (max_i - min_i) * ratio
 
     def _wake_offline_nodes(self):
         """

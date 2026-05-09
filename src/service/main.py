@@ -104,6 +104,17 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
         if 'port' not in self.config:
             self.config['port'] = 45678
 
+        if 'ping_interval_mode' not in self.config:
+            self.config['ping_interval_mode'] = 'power'
+        if 'ping_interval_exponent' not in self.config:
+            self.config['ping_interval_exponent'] = 2.0
+        if 'ping_min_interval' not in self.config:
+            self.config['ping_min_interval'] = 1.0
+        if 'ping_max_interval' not in self.config:
+            self.config['ping_max_interval'] = 5.0
+        if 'ping_interval_nodes' not in self.config:
+            self.config['ping_interval_nodes'] = 10
+
         if 'log_server_port' not in self.config:
             self.config['log_server_port'] = 45679
 

@@ -1,10 +1,9 @@
+// Inject to winlogon.exe
 #include <windows.h>
 #include <MinHook.h>
 #include <string>
 #include <winternl.h>
 #include <fstream>
-#include <powrprof.h>
-#pragma comment(lib, "powrprof.lib")
 
 // ── File log (init only; pipe unavailable during DLL attach) ─────────────────
 void LogToFile(const std::string& msg) {
@@ -19,14 +18,9 @@ void LogToFile(const std::string& msg) {
 // _DllMainCRTStartup may not execute.
 //
 // g_hPipe is ALWAYS accessed under g_pipeLock (exclusive).
-//
-// g_isGhostMode is a volatile LONG; InterlockedExchange / direct volatile read
-// give sequentially-consistent semantics on x86/x64 (all loads/stores are
-// naturally atomic for aligned 32-bit values).
 
-static SRWLOCK       g_pipeLock    = SRWLOCK_INIT;
-static HANDLE        g_hPipe       = INVALID_HANDLE_VALUE;
-static volatile LONG g_isGhostMode = 0;
+static SRWLOCK g_pipeLock = SRWLOCK_INIT;
+static HANDLE  g_hPipe    = INVALID_HANDLE_VALUE;
 
 // Thin RAII guard — constructed only from worker threads, never from static init.
 struct PipeLock {
@@ -66,131 +60,11 @@ void LogToPipe(const std::string& msg) {
     LogToFile("[pre-pipe] " + msg);
 }
 
-// ── NtShutdownSystem ──────────────────────────────────────────────────────────
-typedef enum _SHUTDOWN_ACTION {
-    ShutdownNoReboot,
-    ShutdownReboot,
-    ShutdownPowerOff
-} SHUTDOWN_ACTION;
-extern "C" NTSYSAPI NTSTATUS NTAPI NtShutdownSystem(SHUTDOWN_ACTION Action);
-
-// ── Ghost-mode power-button watcher ──────────────────────────────────────────
-static HWND         g_hPowerWnd    = NULL;
-static HPOWERNOTIFY g_hPowerNotify = NULL;
-static const GUID   GUID_POWERBUTTON_ACTION_FLAGS =
-    { 0x013995e2, 0x1b44, 0x4b3a, { 0xb9, 0x23, 0xf4, 0x96, 0x61, 0xd4, 0x7c, 0x52 } };
-
-void DoHardReboot() {
-    LogToPipe("DoHardReboot: Acquiring SeShutdownPrivilege and calling NtShutdownSystem(Reboot).");
-    HANDLE hToken;
-    TOKEN_PRIVILEGES tkp;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
-        LookupPrivilegeValue(NULL, SE_SHUTDOWN_NAME, &tkp.Privileges[0].Luid);
-        tkp.PrivilegeCount = 1;
-        tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        AdjustTokenPrivileges(hToken, FALSE, &tkp, 0, NULL, 0);
-        CloseHandle(hToken);
-    }
-    NtShutdownSystem(ShutdownReboot);
-}
-
-LRESULT CALLBACK GhostPowerWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_POWERBROADCAST) {
-        if (wParam == PBT_APMPOWERSTATUSCHANGE || wParam == PBT_APMRESUMEAUTOMATIC ||
-            wParam == PBT_APMSUSPEND) {
-            if (g_isGhostMode != 0) {
-                LogToPipe("GhostPowerWndProc: WM_POWERBROADCAST during Ghost Mode. Rebooting.");
-                DoHardReboot();
-            }
-        }
-        if (wParam == PBT_POWERSETTINGCHANGE) {
-            POWERBROADCAST_SETTING* pbs = reinterpret_cast<POWERBROADCAST_SETTING*>(lParam);
-            if (pbs && IsEqualGUID(pbs->PowerSetting, GUID_POWERBUTTON_ACTION_FLAGS)) {
-                if (g_isGhostMode != 0) {
-                    LogToPipe("GhostPowerWndProc: GUID_POWERBUTTON_ACTION_FLAGS change during Ghost Mode. Rebooting.");
-                    DoHardReboot();
-                }
-            }
-        }
-    }
-    return DefWindowProcW(hWnd, msg, wParam, lParam);
-}
-
-DWORD WINAPI GhostPowerWatcherThread(LPVOID) {
-    LogToPipe("GhostPowerWatcherThread: Started.");
-    WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(wc);
-    wc.lpfnWndProc   = GhostPowerWndProc;
-    wc.hInstance     = GetModuleHandleA(NULL);
-    wc.lpszClassName = L"SpowerwkGhostPower";
-    RegisterClassExW(&wc);
-    g_hPowerWnd = CreateWindowExW(0, L"SpowerwkGhostPower", L"",
-        0, 0, 0, 0, 0, HWND_MESSAGE, NULL, GetModuleHandleA(NULL), NULL);
-    if (!g_hPowerWnd) {
-        LogToPipe("GhostPowerWatcherThread: CreateWindowEx failed.");
-        return 1;
-    }
-    g_hPowerNotify = RegisterPowerSettingNotification(
-        g_hPowerWnd, &GUID_POWERBUTTON_ACTION_FLAGS, DEVICE_NOTIFY_WINDOW_HANDLE);
-    LogToPipe("GhostPowerWatcherThread: Window created, entering message loop.");
-    MSG m;
-    while (GetMessageW(&m, NULL, 0, 0) > 0) {
-        TranslateMessage(&m);
-        DispatchMessageW(&m);
-    }
-    if (g_hPowerNotify) { UnregisterPowerSettingNotification(g_hPowerNotify); g_hPowerNotify = NULL; }
-    if (g_hPowerWnd)    { DestroyWindow(g_hPowerWnd); g_hPowerWnd = NULL; }
-    LogToPipe("GhostPowerWatcherThread: Exiting.");
-    return 0;
-}
-
-void StartGhostPowerWatcher() {
-    HANDLE hT = CreateThread(NULL, 0, GhostPowerWatcherThread, NULL, 0, NULL);
-    if (hT) CloseHandle(hT);
-    else LogToPipe("StartGhostPowerWatcher: CreateThread failed.");
-}
-
-void TurnOffDisplay(); // forward declaration — defined below after hook originals
-
-// ── Ghost-mode display keeper ─────────────────────────────────────────────────
-// SC_MONITORPOWER is a one-shot command. After logout, the Winlogon login UI
-// repaints the screen and may wake the display. This thread re-issues the
-// power-off command every DISPLAY_KEEPER_INTERVAL_MS while Ghost Mode is active.
-//
-// Critical: this thread must NEVER create any USER objects (windows, menus…).
-// SetThreadDesktop (called inside TurnOffDisplay) fails if the calling thread
-// already owns windows. Keeping this thread window-free guarantees the desktop
-// switch works on every iteration.
-
-static const DWORD DISPLAY_KEEPER_INITIAL_DELAY_MS  = 2000;  // wait for logout transition
-static const DWORD DISPLAY_KEEPER_INTERVAL_MS       = 10000; // re-send period
-
-DWORD WINAPI GhostDisplayKeeperThread(LPVOID) {
-    LogToPipe("GhostDisplayKeeperThread: Started. Initial delay before first re-send.");
-    Sleep(DISPLAY_KEEPER_INITIAL_DELAY_MS);
-    while (g_isGhostMode != 0) {
-        TurnOffDisplay();
-        Sleep(DISPLAY_KEEPER_INTERVAL_MS);
-    }
-    LogToPipe("GhostDisplayKeeperThread: Ghost mode cleared, exiting.");
-    return 0;
-}
-
-void StartGhostDisplayKeeper() {
-    HANDLE hT = CreateThread(NULL, 0, GhostDisplayKeeperThread, NULL, 0, NULL);
-    if (hT) CloseHandle(hT);
-    else LogToPipe("StartGhostDisplayKeeper: CreateThread failed.");
-}
 
 // ── Hook originals ────────────────────────────────────────────────────────────
 typedef void(__fastcall* tShutdownWindowsWorkerThread)(PTP_CALLBACK_INSTANCE Instance, PVOID Context);
 tShutdownWindowsWorkerThread Original_ShutdownWindowsWorkerThread = nullptr;
 
-typedef __int64(__fastcall* tWlDisplayStatusByResourceId)(unsigned int a1, unsigned int a2, unsigned int a3, PVOID a4);
-tWlDisplayStatusByResourceId Original_WlDisplayStatusByResourceId = nullptr;
-
-typedef __int64(__fastcall* tWlStateMachineSetSignal)(unsigned int a1, PVOID a2);
-tWlStateMachineSetSignal Original_WlStateMachineSetSignal = nullptr;
 
 // ── Shutdown policy query ─────────────────────────────────────────────────────
 // Holds g_pipeLock for the full write→read round-trip so LOG: messages cannot
@@ -224,85 +98,20 @@ bool AskPythonServiceToBlockShutdown() {
     return false;
 }
 
-// ── TurnOffDisplay ─────────────────────────────────────────────────────────────
-// winlogon.exe already runs inside WinSta0; SetProcessWindowStation must NOT
-// be called here because it is process-wide and would corrupt the window-station
-// state of every other winlogon thread (clipboard chain, class atoms, USER
-// handle tables are all window-station-scoped).
-// SetThreadDesktop is thread-local and safe to call from inside winlogon.
-void TurnOffDisplay() {
-    LogToPipe("TurnOffDisplay: Switching thread desktop to Winlogon and sending SC_MONITORPOWER=2.");
-
-    // Prevent the OS from immediately waking the display
-    SetThreadExecutionState(ES_CONTINUOUS);
-
-    // Save the current thread desktop so we can restore it afterwards
-    HDESK hOriginalDesktop = GetThreadDesktop(GetCurrentThreadId());
-
-    // winlogon.exe is already associated with WinSta0, so OpenDesktopW resolves
-    // the "Winlogon" desktop within the process window station directly.
-    HDESK hDesk = OpenDesktopW(L"Winlogon", 0, FALSE, MAXIMUM_ALLOWED);
-    if (!hDesk) {
-        LogToPipe("TurnOffDisplay: OpenDesktopW(Winlogon) failed. Error: " + std::to_string(GetLastError()));
-        return;
-    }
-
-    if (SetThreadDesktop(hDesk)) {
-        LogToPipe("TurnOffDisplay: On Winlogon desktop. Broadcasting SC_MONITORPOWER=2...");
-        DWORD_PTR result = 0;
-        SendMessageTimeoutW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2,
-            SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG, 2000, &result);
-        HWND hDesktopWnd = GetDesktopWindow();
-        if (hDesktopWnd)
-            SendMessageTimeoutW(hDesktopWnd, WM_SYSCOMMAND, SC_MONITORPOWER, 2,
-                SMTO_ABORTIFHUNG, 1000, &result);
-        SetThreadDesktop(hOriginalDesktop);
-    } else {
-        LogToPipe("TurnOffDisplay: SetThreadDesktop failed. Error: " + std::to_string(GetLastError()));
-    }
-    CloseDesktop(hDesk);
-    LogToPipe("TurnOffDisplay: Done.");
-}
 
 // ── Hooked functions ──────────────────────────────────────────────────────────
 __declspec(guard(nocf))
 void __fastcall Hooked_ShutdownWindowsWorkerThread(PTP_CALLBACK_INSTANCE Instance, PVOID Context) {
-    if (g_isGhostMode != 0) {
-        LogToPipe("Hooked_ShutdownWindowsWorkerThread: Ghost mode active. Secondary call - hard reboot!");
-        DoHardReboot();
-        return;
-    }
-    LogToPipe("Hooked_ShutdownWindowsWorkerThread: Intercepted primary shutdown call. Querying Service...");
+    LogToPipe("Hooked_ShutdownWindowsWorkerThread: Intercepted shutdown call. Querying Service...");
     if (AskPythonServiceToBlockShutdown()) {
-        LogToPipe("Service replied BLOCK. Entering Ghost Mode and spoofing context.");
-        InterlockedExchange(&g_isGhostMode, 1);
-        StartGhostPowerWatcher();
-        StartGhostDisplayKeeper();
-        TurnOffDisplay();
-        Original_ShutdownWindowsWorkerThread(Instance, (PVOID)0);
+        LogToPipe("Service replied BLOCK. Converting shutdown to reboot force.");
+        Original_ShutdownWindowsWorkerThread(Instance, (PVOID)(EWX_REBOOT | EWX_FORCE));
     } else {
         LogToPipe("Service replied ALLOW. Permitting normal shutdown.");
         Original_ShutdownWindowsWorkerThread(Instance, Context);
     }
 }
 
-__declspec(guard(nocf))
-__int64 __fastcall Hooked_WlDisplayStatusByResourceId(unsigned int a1, unsigned int a2, unsigned int a3, PVOID a4) {
-    if (g_isGhostMode != 0 && a1 == 1003) {
-        LogToPipe("Hooked_WlDisplayStatusByResourceId: Spoofing logout UI (1003) to shutdown UI (1204).");
-        a1 = 1204;
-    }
-    return Original_WlDisplayStatusByResourceId(a1, a2, a3, a4);
-}
-
-__declspec(guard(nocf))
-__int64 __fastcall Hooked_WlStateMachineSetSignal(unsigned int a1, PVOID a2) {
-    if (g_isGhostMode != 0 && a1 == 3 && a2 == nullptr) {
-        LogToPipe("Hooked_WlStateMachineSetSignal: Intercepted SAS (Ctrl+Alt+Del) signal in Ghost Mode. Blocking.");
-        return 13;
-    }
-    return Original_WlStateMachineSetSignal(a1, a2);
-}
 
 // ── InitThread: connect → handshake → heartbeat, reconnects forever ───────────
 //
@@ -370,16 +179,10 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
                         phaseOk = false;
                     } else {
                         std::string shutdownRvaStr = msg.substr(c1 + 1, c2 - c1 - 1);
-                        std::string displayRvaStr  = msg.substr(c2 + 1, c3 - c2 - 1);
-                        std::string sasRvaStr      = msg.substr(c3 + 1);
-                        if (!sasRvaStr.empty() && sasRvaStr.back() == '\0') sasRvaStr.pop_back();
 
-                        LogToFile("InitThread: shutdownRva=" + shutdownRvaStr
-                            + " displayRva=" + displayRvaStr + " sasRva=" + sasRvaStr);
+                        LogToFile("InitThread: shutdownRva=" + shutdownRvaStr);
 
                         uint64_t shutdownRva = std::stoull(shutdownRvaStr, nullptr, 16);
-                        uint64_t displayRva  = std::stoull(displayRvaStr,  nullptr, 16);
-                        uint64_t sasRva      = std::stoull(sasRvaStr,      nullptr, 16);
 
                         HMODULE hMod = GetModuleHandleA(NULL);
                         if (!hMod) {
@@ -390,8 +193,6 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
 
                         if (phaseOk) {
                             void* tShutdown = (void*)((uintptr_t)hMod + shutdownRva);
-                            void* tDisplay  = (void*)((uintptr_t)hMod + displayRva);
-                            void* tSas      = (void*)((uintptr_t)hMod + sasRva);
 
                             LogToFile("InitThread: Calling MH_Initialize...");
                             MH_STATUS mhInit = MH_Initialize();
@@ -409,18 +210,6 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
                                     LogToPipe("InitThread: MH_CreateHook Shutdown=" + std::to_string((int)s));
                                 } else {
                                     LogToPipe("InitThread: shutdownRva=0, skipping hook.");
-                                }
-                                if (displayRva != 0) {
-                                    MH_STATUS s = MH_CreateHook(tDisplay,
-                                        &Hooked_WlDisplayStatusByResourceId,
-                                        reinterpret_cast<LPVOID*>(&Original_WlDisplayStatusByResourceId));
-                                    LogToPipe("InitThread: MH_CreateHook Display=" + std::to_string((int)s));
-                                }
-                                if (sasRva != 0) {
-                                    MH_STATUS s = MH_CreateHook(tSas,
-                                        &Hooked_WlStateMachineSetSignal,
-                                        reinterpret_cast<LPVOID*>(&Original_WlStateMachineSetSignal));
-                                    LogToPipe("InitThread: MH_CreateHook SAS=" + std::to_string((int)s));
                                 }
 
                                 // CFG: register hook stubs and trampolines as valid call targets
@@ -447,11 +236,7 @@ DWORD WINAPI InitThread(LPVOID /*lpParam*/) {
                                             + std::to_string(base));
                                     };
                                     RegPage((void*)Original_ShutdownWindowsWorkerThread);
-                                    RegPage((void*)Original_WlDisplayStatusByResourceId);
-                                    RegPage((void*)Original_WlStateMachineSetSignal);
                                     RegPage((void*)&Hooked_ShutdownWindowsWorkerThread);
-                                    RegPage((void*)&Hooked_WlDisplayStatusByResourceId);
-                                    RegPage((void*)&Hooked_WlStateMachineSetSignal);
                                 }
                                 LogToFile("InitThread: CFG registration done.");
 
