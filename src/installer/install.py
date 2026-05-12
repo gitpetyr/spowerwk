@@ -134,11 +134,11 @@ def main():
             "binPath=", f'"{svc_exe}"',
             "start=", "auto",
             "DisplayName=", "Windows 电源管理服务"
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, encoding="oem", errors="replace")
 
         if install_res.returncode == 0:
             print("服务注册成功。正在启动服务...")
-            start_res = subprocess.run(["sc", "start", "spowerwk"], capture_output=True, text=True)
+            start_res = subprocess.run(["sc", "start", "spowerwk"], capture_output=True, text=True, encoding="oem", errors="replace")
             if start_res.returncode == 0:
                 print("spowerwk 服务启动成功！")
             else:
