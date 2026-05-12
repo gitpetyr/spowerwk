@@ -97,12 +97,12 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt nuitka ordered-set zstandard
 
-    - name: Build Python Service with Nuitka onefile (spowerwk_svc)
+    - name: Build Python Service with Nuitka standalone (spowerwk_svc)
       shell: pwsh
       run: |
         $env:PYTHONPATH = "src\service"
         python -m nuitka `
-          --onefile `
+          --standalone `
           --windows-console-mode=disable `
           --assume-yes-for-downloads `
           --include-module=crypto `
@@ -118,9 +118,12 @@ jobs:
           --include-module=win32timezone `
           --include-module=pywintypes `
           --output-filename=spowerwk_svc.exe `
+          --output-dir=dist_build `
           src\service\main.py
-        New-Item -ItemType Directory -Force dist\spowerwk_svc | Out-Null
-        Move-Item spowerwk_svc.exe dist\spowerwk_svc\
+        # Nuitka standalone 以脚本名命名输出目录 (main.dist)，重命名为 spowerwk_svc
+        New-Item -ItemType Directory -Force dist | Out-Null
+        Rename-Item "dist_build\main.dist" -NewName "spowerwk_svc"
+        Move-Item "dist_build\spowerwk_svc" "dist\spowerwk_svc"
 
     - name: Upload Service
       uses: actions/upload-artifact@v7
@@ -171,29 +174,32 @@ jobs:
         name: spowerwk-svc
         path: dist/spowerwk_svc/
 
-    - name: Verify artifacts before packaging
+    - name: Pack payload as LZMA tar
       shell: pwsh
       run: |
-        Write-Host "=== dist\spowerwk_svc\ ==="
-        Get-ChildItem -Recurse dist\spowerwk_svc\
-        if (-not (Test-Path "dist\spowerwk_svc\spowerwk_svc.exe")) {
-          Write-Error "spowerwk_svc.exe not found!"; exit 1
-        }
-        Write-Host "=== RVA DB ===" ; Test-Path unified_rva_db.json.xz
-        Write-Host "=== Hook DLL ===" ; Test-Path build\Release\spowerwkHook.dll
+        python -c "
+import tarfile, lzma, io, os, sys
+
+buf = io.BytesIO()
+with tarfile.open(fileobj=buf, mode='w') as tar:
+    tar.add(r'dist\spowerwk_svc', arcname='spowerwk_svc')
+    tar.add(r'build\Release\spowerwkHook.dll', arcname='spowerwkHook.dll')
+    tar.add('unified_rva_db.json.xz', arcname='unified_rva_db.json.xz')
+
+compressed = lzma.compress(buf.getvalue(), preset=lzma.PRESET_EXTREME)
+with open('payload.tar.xz', 'wb') as f:
+    f.write(compressed)
+mb = len(compressed) / 1024 / 1024
+print(f'payload.tar.xz: {mb:.1f} MB')
+"
 
     - name: Build Installer with Nuitka onefile (spowerwk.exe)
       shell: pwsh
       run: |
-        $svcExe = (Resolve-Path "dist\spowerwk_svc\spowerwk_svc.exe").Path
-        $hookDll = (Resolve-Path "build\Release\spowerwkHook.dll").Path
-        $rvaDb   = (Resolve-Path "unified_rva_db.json.xz").Path
         python -m nuitka `
           --onefile `
           --assume-yes-for-downloads `
-          "--include-data-files=$svcExe=spowerwk_svc\spowerwk_svc.exe" `
-          "--include-data-files=$rvaDb=unified_rva_db.json.xz" `
-          "--include-data-files=$hookDll=spowerwkHook.dll" `
+          "--include-data-files=payload.tar.xz=payload.tar.xz" `
           --output-filename=spowerwk.exe `
           src\installer\install.py
         New-Item -ItemType Directory -Force dist | Out-Null

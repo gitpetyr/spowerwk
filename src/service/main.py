@@ -126,7 +126,7 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
 
     def load_rva_db(self):
         xz_path = os.path.join(os.path.dirname(sys.executable), 'unified_rva_db.json.xz')
-        
+
         if not os.path.exists(xz_path):
             xz_path = 'unified_rva_db.json.xz' # Fallback for dev
             
