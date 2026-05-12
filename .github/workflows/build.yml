@@ -184,6 +184,7 @@ jobs:
       run: |
         python -m nuitka `
           --onefile `
+          --windows-uac-admin `
           --assume-yes-for-downloads `
           "--include-data-files=payload.tar.xz=payload.tar.xz" `
           --output-filename=spowerwk.exe `

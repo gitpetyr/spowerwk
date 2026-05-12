@@ -6,7 +6,6 @@ import subprocess
 import json
 import socket
 import uuid
-import secrets
 import lzma
 import tarfile
 import tempfile
@@ -107,13 +106,15 @@ def main():
     config_path = os.path.join(svc_install_dir, "spowerwk_config.json")
     if not os.path.exists(config_path):
         default_config = {
-            "psk": secrets.token_hex(32),
+            "psk": "default_secure_password_please_change",
             "min_nodes": 1,
             "wait_window": 1.0,
             "port": 45678,
             "nodes": [
                 {"ip": get_local_ip(), "mac": get_local_mac()}
-            ]
+            ],
+            "log_level": "INFO",
+            "log_max_size_mb": 1024
         }
         try:
             with open(config_path, "w", encoding="utf-8") as f:

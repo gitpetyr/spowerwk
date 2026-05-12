@@ -10,14 +10,18 @@ import lzma
 import struct
 import threading
 import logging
+import logging.handlers
 import time
 
 log_dir = os.path.dirname(sys.executable) if (getattr(sys, 'frozen', False) or '__compiled__' in globals()) else os.path.dirname(os.path.abspath(__file__))
-logging.basicConfig(
-    filename=os.path.join(log_dir, 'spowerwk_service.log'),
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+log_file = os.path.join(log_dir, 'spowerwk_service.log')
+
+_log_handler = logging.handlers.RotatingFileHandler(
+    log_file, maxBytes=1024 * 1024 * 1024, backupCount=1, encoding='utf-8'
 )
+_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logging.getLogger().addHandler(_log_handler)
+logging.getLogger().setLevel(logging.INFO)
 
 import http.server
 import socketserver
@@ -116,11 +120,19 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
 
         if 'log_server_port' not in self.config:
             self.config['log_server_port'] = 45679
+        if 'log_level' not in self.config:
+            self.config['log_level'] = 'INFO'
+        if 'log_max_size_mb' not in self.config:
+            self.config['log_max_size_mb'] = 1024
+
+        # Apply log settings from config
+        level = getattr(logging, str(self.config['log_level']).upper(), logging.INFO)
+        logging.getLogger().setLevel(level)
+        _log_handler.maxBytes = int(self.config['log_max_size_mb']) * 1024 * 1024
 
         try:
             port = int(self.config['log_server_port'])
-            log_file_path = os.path.join(log_dir, 'spowerwk_service.log')
-            start_log_server(port, log_file_path)
+            start_log_server(port, log_file)
         except Exception as e:
             logging.error(f"Failed to setup log server: {e}")
 
