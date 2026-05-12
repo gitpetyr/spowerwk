@@ -171,15 +171,27 @@ jobs:
         name: spowerwk-svc
         path: dist/spowerwk_svc/
 
+    - name: Verify artifacts before packaging
+      shell: pwsh
+      run: |
+        Write-Host "=== dist\spowerwk_svc\ ==="
+        Get-ChildItem -Recurse dist\spowerwk_svc\
+        if (-not (Test-Path "dist\spowerwk_svc\spowerwk_svc.exe")) {
+          Write-Error "spowerwk_svc.exe not found!"; exit 1
+        }
+        Write-Host "=== RVA DB ===" ; Test-Path unified_rva_db.json.xz
+        Write-Host "=== Hook DLL ===" ; Test-Path build\Release\spowerwkHook.dll
+
     - name: Build Installer with Nuitka onefile (spowerwk.exe)
       shell: pwsh
       run: |
+        $svcDir = (Resolve-Path "dist\spowerwk_svc").Path
         python -m nuitka `
           --onefile `
           --assume-yes-for-downloads `
-          "--include-data-dir=dist/spowerwk_svc=spowerwk_svc" `
+          "--include-data-dir=$svcDir=spowerwk_svc" `
           "--include-data-files=unified_rva_db.json.xz=unified_rva_db.json.xz" `
-          "--include-data-files=build/Release/spowerwkHook.dll=spowerwkHook.dll" `
+          "--include-data-files=build\Release\spowerwkHook.dll=spowerwkHook.dll" `
           --output-filename=spowerwk.exe `
           src\installer\install.py
         New-Item -ItemType Directory -Force dist | Out-Null
