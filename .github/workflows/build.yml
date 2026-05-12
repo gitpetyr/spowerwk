@@ -185,13 +185,15 @@ jobs:
     - name: Build Installer with Nuitka onefile (spowerwk.exe)
       shell: pwsh
       run: |
-        $svcDir = (Resolve-Path "dist\spowerwk_svc").Path
+        $svcExe = (Resolve-Path "dist\spowerwk_svc\spowerwk_svc.exe").Path
+        $hookDll = (Resolve-Path "build\Release\spowerwkHook.dll").Path
+        $rvaDb   = (Resolve-Path "unified_rva_db.json.xz").Path
         python -m nuitka `
           --onefile `
           --assume-yes-for-downloads `
-          "--include-data-dir=$svcDir=spowerwk_svc" `
-          "--include-data-files=unified_rva_db.json.xz=unified_rva_db.json.xz" `
-          "--include-data-files=build\Release\spowerwkHook.dll=spowerwkHook.dll" `
+          "--include-data-files=$svcExe=spowerwk_svc\spowerwk_svc.exe" `
+          "--include-data-files=$rvaDb=unified_rva_db.json.xz" `
+          "--include-data-files=$hookDll=spowerwkHook.dll" `
           --output-filename=spowerwk.exe `
           src\installer\install.py
         New-Item -ItemType Directory -Force dist | Out-Null
