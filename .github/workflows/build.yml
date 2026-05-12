@@ -177,21 +177,7 @@ jobs:
     - name: Pack payload as LZMA tar
       shell: pwsh
       run: |
-        python -c "
-import tarfile, lzma, io, os, sys
-
-buf = io.BytesIO()
-with tarfile.open(fileobj=buf, mode='w') as tar:
-    tar.add(r'dist\spowerwk_svc', arcname='spowerwk_svc')
-    tar.add(r'build\Release\spowerwkHook.dll', arcname='spowerwkHook.dll')
-    tar.add('unified_rva_db.json.xz', arcname='unified_rva_db.json.xz')
-
-compressed = lzma.compress(buf.getvalue(), preset=lzma.PRESET_EXTREME)
-with open('payload.tar.xz', 'wb') as f:
-    f.write(compressed)
-mb = len(compressed) / 1024 / 1024
-print(f'payload.tar.xz: {mb:.1f} MB')
-"
+        python -c "import tarfile, lzma, io; buf=io.BytesIO(); tar=tarfile.open(fileobj=buf, mode='w'); tar.add(r'dist\spowerwk_svc', 'spowerwk_svc'); tar.add(r'build\Release\spowerwkHook.dll', 'spowerwkHook.dll'); tar.add('unified_rva_db.json.xz', 'unified_rva_db.json.xz'); tar.close(); compressed=lzma.compress(buf.getvalue(), preset=lzma.PRESET_EXTREME); open('payload.tar.xz', 'wb').write(compressed); print(f'payload.tar.xz: {len(compressed)/1048576:.1f} MB')"
 
     - name: Build Installer with Nuitka onefile (spowerwk.exe)
       shell: pwsh
