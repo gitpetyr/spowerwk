@@ -4,10 +4,17 @@ import time
 import random
 import struct
 import math
+import uuid
+import re
+import os
+import json
+import tempfile
 from crypto import SecureChannel
 
+_MAC_RE = re.compile(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$')
+
 class P2PManager:
-    def __init__(self, config, crypto_channel: SecureChannel):
+    def __init__(self, config, crypto_channel: SecureChannel, config_path: str = ''):
         self.nodes = config.get('nodes', [])
         self.min_nodes = config.get('min_nodes', 1)
         self.wait_window = config.get('wait_window', 1.0)
@@ -21,11 +28,29 @@ class P2PManager:
         # Bug #3 fix: get local IP so we can filter self-PING and use as intent key
         self.local_ip = self._get_local_ip()
 
+        # Local MAC for auto-discovery PING payload
+        _node = uuid.getnode()
+        _mac_bytes = _node.to_bytes(6, 'big')
+        self.local_mac = ':'.join(f'{b:02X}' for b in _mac_bytes)
+
+        # Auto-discover state
+        self._config_path = config_path
+        self._discovered: dict = {}
+        self._nodes_dirty = False
+        self._debounce_timer = None
+        self._timer_lock = threading.Lock()
+
+        # Seed _discovered from existing config nodes
+        for node in config.get('nodes', []):
+            mac = node.get('mac', '')
+            if mac:
+                self._discovered[mac] = {'ip': node.get('ip', ''), 'mac': mac}
+
         # Setup UDP Broadcast Socket
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self.udp_sock.bind(('', self.broadcast_port))
-        
+
         # Start listeners
         threading.Thread(target=self._listen_udp, daemon=True).start()
         threading.Thread(target=self._ping_loop, daemon=True).start()
@@ -55,16 +80,100 @@ class P2PManager:
                     with self.lock:
                         self.intents[addr[0]] = msg.get('weight', 0)
                 elif msg.get('type') == 'PING':
-                    # Bug #2 fix: protect active_nodes with the same lock used in _ping_loop
+                    ip = addr[0]
+                    mac = msg.get('mac', '')
+                    dirty = False
                     with self.lock:
-                        self.active_nodes.add(addr[0])
+                        self.active_nodes.add(ip)
+                        if _MAC_RE.match(mac) and self.config.get('auto_discover_nodes', True):
+                            if mac not in self._discovered:
+                                self._discovered[mac] = {'ip': ip, 'mac': mac}
+                                self._nodes_dirty = True
+                                dirty = True
+                            elif self._discovered[mac]['ip'] != ip:
+                                self._discovered[mac]['ip'] = ip
+                                self._nodes_dirty = True
+                                dirty = True
+                    if dirty:
+                        self._reset_debounce()
             except Exception:
                 pass
+
+    def _reset_debounce(self):
+        with self._timer_lock:
+            if self._debounce_timer:
+                self._debounce_timer.cancel()
+            self._debounce_timer = threading.Timer(1.0, self._flush_nodes)
+            self._debounce_timer.start()
+
+    def _flush_nodes(self):
+        with self.lock:
+            if not self._nodes_dirty:
+                return
+            snapshot = list(self._discovered.values())
+            self._nodes_dirty = False
+
+        if not self._config_path:
+            return
+
+        try:
+            try:
+                with open(self._config_path, 'r') as f:
+                    cfg = json.load(f)
+            except Exception:
+                cfg = {}
+
+            cfg['nodes'] = snapshot
+
+            dirpath = os.path.dirname(self._config_path) or '.'
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix='.tmp')
+            try:
+                with os.fdopen(tmp_fd, 'w') as f:
+                    json.dump(cfg, f, indent=2)
+                os.replace(tmp_path, self._config_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def shutdown(self):
+        """Cancel pending debounce timer and flush any unsaved discoveries."""
+        with self._timer_lock:
+            if self._debounce_timer:
+                self._debounce_timer.cancel()
+                self._debounce_timer = None
+        if self._nodes_dirty:
+            self._flush_nodes()
+
+    def update_config(self, new_config, new_crypto=None):
+        """Hot-reload runtime parameters. Merges nodes (add/update only, never delete)."""
+        with self.lock:
+            for key in ('min_nodes', 'wait_window', 'ping_interval_mode',
+                        'ping_interval_exponent', 'ping_min_interval',
+                        'ping_max_interval', 'ping_interval_nodes',
+                        'log_level', 'auto_discover_nodes'):
+                if key in new_config:
+                    self.config[key] = new_config[key]
+
+            for node in new_config.get('nodes', []):
+                mac = node.get('mac', '')
+                if not mac:
+                    continue
+                if mac not in self._discovered:
+                    self._discovered[mac] = {'ip': node.get('ip', ''), 'mac': mac}
+                elif self._discovered[mac]['ip'] != node.get('ip', ''):
+                    self._discovered[mac]['ip'] = node.get('ip', '')
+
+            if new_crypto is not None:
+                self.crypto = new_crypto
 
     def _ping_loop(self):
         interval = self.config.get('ping_min_interval', 1.0)
         while True:
-            ping_msg = self.crypto.encrypt_message({'type': 'PING'})
+            ping_msg = self.crypto.encrypt_message({'type': 'PING', 'mac': self.local_mac})
             try:
                 self.udp_sock.sendto(ping_msg, ('<broadcast>', self.broadcast_port))
             except Exception:
@@ -110,7 +219,7 @@ class P2PManager:
         Sends WoL Magic Packets to nodes not currently active.
         NOTE: Must be called while holding self.lock, as it reads self.active_nodes.
         """
-        for node in self.nodes:
+        for node in self._discovered.values():
             if node['ip'] not in self.active_nodes:
                 mac = node['mac'].replace(':', '').replace('-', '')
                 if len(mac) == 12:
@@ -127,35 +236,35 @@ class P2PManager:
         """
         weight = random.random()
         msg = self.crypto.encrypt_message({'type': 'SHUTDOWN_INTENT', 'weight': weight})
-        
+
         # Bug #5 fix: use real local IP as key, not 'localhost', so all nodes
         # in the cluster can consistently rank each other's intents.
         with self.lock:
             self.intents.clear()
             self.intents[self.local_ip] = weight
-            
+
         # Broadcast intent
         try:
             self.udp_sock.sendto(msg, ('<broadcast>', self.broadcast_port))
         except Exception:
             pass
-            
+
         time.sleep(self.wait_window)
-        
+
         with self.lock:
             total_active = max(len(self.active_nodes), len(self.intents))
             # Sort intents descending
             sorted_intents = sorted(self.intents.items(), key=lambda x: x[1], reverse=True)
-            
+
             my_rank = 0
             for i, (ip, w) in enumerate(sorted_intents):
                 # Bug #5 fix: compare against self.local_ip instead of 'localhost'
                 if ip == self.local_ip:
                     my_rank = i
                     break
-            
+
             allowed_shutdowns = max(0, total_active - self.min_nodes)
             if my_rank < allowed_shutdowns:
-                return True # Allow
+                return True  # Allow
             else:
-                return False # Block
+                return False  # Block

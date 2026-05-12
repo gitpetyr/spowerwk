@@ -75,11 +75,14 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
         self.rva_db = {}
         self.p2p = None
         self.pipe_connected = False
+        self._config_path = ''
 
     def SvcStop(self):
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
         win32event.SetEvent(self.hWaitStop)
         self.running = False
+        if self.p2p is not None:
+            self.p2p.shutdown()
 
     def SvcDoRun(self):
         servicemanager.LogMsg(servicemanager.EVENTLOG_INFORMATION_TYPE,
@@ -90,13 +93,14 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
 
     def load_config(self):
         config_path = os.path.join(os.path.dirname(sys.executable), 'spowerwk_config.json')
+        self._config_path = config_path
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
                     self.config = json.load(f)
             except Exception:
                 pass
-        
+
         # Defaults
         if 'psk' not in self.config:
             self.config['psk'] = 'default_secure_password_please_change'
@@ -124,6 +128,8 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             self.config['log_level'] = 'INFO'
         if 'log_max_size_mb' not in self.config:
             self.config['log_max_size_mb'] = 1024
+        if 'auto_discover_nodes' not in self.config:
+            self.config['auto_discover_nodes'] = True
 
         # Apply log settings from config
         level = getattr(logging, str(self.config['log_level']).upper(), logging.INFO)
@@ -374,19 +380,53 @@ class SpowerwkService(win32serviceutil.ServiceFramework):
             time.sleep(10)
 
 
+    def _config_reload_loop(self):
+        try:
+            last_mtime = os.path.getmtime(self._config_path)
+        except Exception:
+            last_mtime = 0
+
+        while self.running:
+            time.sleep(10)
+            try:
+                mtime = os.path.getmtime(self._config_path)
+                if mtime == last_mtime:
+                    continue
+                last_mtime = mtime
+
+                with open(self._config_path, 'r') as f:
+                    new_cfg = json.load(f)
+
+                level = getattr(logging, str(new_cfg.get('log_level', 'INFO')).upper(), logging.INFO)
+                logging.getLogger().setLevel(level)
+
+                if self.p2p is not None:
+                    new_crypto = None
+                    if new_cfg.get('psk') != self.config.get('psk'):
+                        new_crypto = SecureChannel(new_cfg['psk'])
+                    self.p2p.update_config(new_cfg, new_crypto)
+
+                self.config = new_cfg
+                logging.info("Config hot-reloaded successfully")
+            except Exception as e:
+                logging.error(f"Config reload error: {e}")
+
     def main(self):
         self.load_config()
         self.load_rva_db()
-        
+
         crypto = SecureChannel(self.config['psk'])
-        self.p2p = P2PManager(self.config, crypto)
-        
+        self.p2p = P2PManager(self.config, crypto, config_path=self._config_path)
+
         t_ipc = threading.Thread(target=self.ipc_server_loop, daemon=True)
         t_ipc.start()
-        
+
         t_inj = threading.Thread(target=self.injector_loop, daemon=True)
         t_inj.start()
-        
+
+        t_reload = threading.Thread(target=self._config_reload_loop, daemon=True)
+        t_reload.start()
+
         win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
 
 if __name__ == '__main__':
